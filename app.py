@@ -1,4 +1,3 @@
-
 import os, io, re, sys, json, tempfile, subprocess
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
@@ -7,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# ---- Safe imports (soft fail) ----
+# ---------- Safe imports with soft fallbacks ----------
 def safe_import(name, pip=None):
     try:
         return __import__(name)
@@ -18,8 +17,8 @@ def safe_import(name, pip=None):
             st.warning(f"Optional dependency '{name}' not installed")
         return None
 
-fitz = safe_import("fitz", "PyMuPDF")
-cv2 = safe_import("cv2", "opencv-python-headless")
+fitz = safe_import("fitz", "PyMuPDF")  # for PDF reading & rendering
+cv2 = safe_import("cv2", "opencv-python-headless")  # for misalignment detection
 SpellChecker = None
 try:
     from spellchecker import SpellChecker as _SC
@@ -28,9 +27,7 @@ except Exception:
     st.warning("Optional dependency 'pyspellchecker' not installed (pip install pyspellchecker)")
 pdfminer = safe_import("pdfminer", "pdfminer.six")
 
-# ---- Data structures ----
-from dataclasses import dataclass, field
-
+# ---------- Data structures ----------
 @dataclass
 class Rule:
     id: str
@@ -54,17 +51,24 @@ class Finding:
     message: str
     context: Optional[str] = None
 
-# ---- Utils ----
+# ---------- Utils ----------
 def load_rules(file: Optional[io.BytesIO]) -> Dict[str, Any]:
+    """
+    Load YAML rules. Use the bundled rules_example.yaml if none uploaded.
+    """
     default_path = os.path.join(os.path.dirname(__file__), "rules_example.yaml")
     import yaml
     if file is None:
         with open(default_path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f)
     else:
+        # Ensure bytes → str and parse
         return yaml.safe_load(file.getvalue().decode("utf-8", errors="ignore"))
 
 def tokenise(text: str) -> List[str]:
+    """
+    Tokeniser that keeps technical tokens reasonably intact.
+    """
     raw = re.findall(r"[A-Za-z][A-Za-z\-']{1,}|[A-Za-z]{2,}\d+|\d+[A-Za-z]+", text)
     return [t.strip("'").strip("-") for t in raw]
 
@@ -85,7 +89,7 @@ def extract_text_pdfminer(buf: bytes) -> List[str]:
     except Exception:
         return [""]
 
-def page_skew_angle_from_pix(pix):
+def page_skew_angle_from_pix(pix) -> Optional[float]:
     if cv2 is None:
         return None
     try:
@@ -107,7 +111,7 @@ def page_skew_angle_from_pix(pix):
     except Exception:
         return None
 
-def detect_misalignment(doc):
+def detect_misalignment(doc) -> List[Tuple[int, float]]:
     res = []
     if fitz is None:
         return res
@@ -116,12 +120,12 @@ def detect_misalignment(doc):
             pix = doc[i].get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
             ang = page_skew_angle_from_pix(pix)
             if ang is not None:
-                res.append((i+1, ang))
+                res.append((i + 1, ang))
         except Exception:
             pass
     return res
 
-def compile_client_packs(blob: Dict[str, Any]):
+def compile_client_packs(blob: Dict[str, Any]) -> Tuple[Dict[str, ClientPack], set]:
     packs = {}
     allowlist = set([w.lower() for w in blob.get("allowlist", [])])
     for c in blob.get("clients", []):
@@ -142,22 +146,55 @@ def compile_client_packs(blob: Dict[str, Any]):
         )
     return packs, allowlist
 
+# ---------- Hardened spelling checker (fixes TypeError) ----------
 def spell_findings(text_pages: List[str], allowlist: set, client_allow: set) -> List[Finding]:
     finds = []
     if SpellChecker is None:
         return finds
-    sc = SpellChecker(language='en')
+
+    try:
+        sc = SpellChecker(language="en")
+    except Exception:
+        # If dictionaries fail to load, skip spelling cleanly
+        return finds
+
+    # Add domain words (allowlist + acronyms seen in doc)
     for w in list(allowlist | client_allow):
-        if re.match(r"^[A-Za-z][A-Za-z0-9\-]{1,}$", w):
-            sc.word_frequency.add(w.lower())
+        if isinstance(w, str) and re.match(r"^[A-Za-z][A-Za-z0-9\-]{1,}$", w):
+            try:
+                sc.word_frequency.add(w.lower())
+            except Exception:
+                pass
+
     for pno, text in enumerate(text_pages, start=1):
         tokens = tokenise(text)
-        check = [t.lower() for t in tokens if t.islower() and len(t) >= 3]
-        miss = sc.unknown(check)
+        # Keep only alpha words 3+ letters to avoid library edge cases
+        check = [t.lower() for t in tokens if isinstance(t, str) and t.isalpha() and len(t) >= 3]
+        try:
+            miss = sc.unknown(check)
+        except Exception:
+            miss = set()
+
         for m in sorted(miss):
-            if m in allowlist or m in client_allow:
+            if (m in allowlist) or (m in client_allow):
                 continue
-            suggestion = next(iter(sc.candidates(m)), None)
+
+            # Defensive suggestion logic (some versions raise TypeError)
+            suggestion = None
+            try:
+                corr = sc.correction(m)
+                if corr and corr != m:
+                    suggestion = corr
+                else:
+                    cands = set()
+                    try:
+                        cands = sc.candidates(m) or set()
+                    except Exception:
+                        cands = set()
+                    suggestion = next(iter(cands - {m}), None) or None
+            except Exception:
+                suggestion = None
+
             msg = f"Possible typo: '{m}'" + (f" → '{suggestion}'" if suggestion else "")
             finds.append(Finding(file="", page=pno, kind="Spelling", message=msg))
     return finds
@@ -165,9 +202,11 @@ def spell_findings(text_pages: List[str], allowlist: set, client_allow: set) -> 
 def checklist_findings(text_pages: List[str], pack: ClientPack) -> List[Finding]:
     finds = []
     for pno, text in enumerate(text_pages, start=1):
+        # Global includes
         for s in pack.global_includes:
             if s and s not in text:
                 finds.append(Finding(file="", page=pno, kind="Checklist", message=f"Missing required text: '{s}'"))
+        # Page rules
         for rule in pack.page_rules:
             if rule.when_page_contains and rule.when_page_contains not in text:
                 continue
@@ -176,28 +215,30 @@ def checklist_findings(text_pages: List[str], pack: ClientPack) -> List[Finding]
                     hint = rule.hint or ""
                     finds.append(Finding(file="", page=pno, kind="Checklist", message=f"[{rule.id}] Missing pattern: {rx}. {hint}".strip()))
             for forb in rule.forbids:
-                pat = forb.get("pattern","")
+                pat = forb.get("pattern", "")
                 if pat and re.search(pat, text, flags=re.IGNORECASE):
                     finds.append(Finding(file="", page=pno, kind="Checklist", message=f"[{rule.id}] Forbidden phrase present: '{pat}'. Hint: {forb.get('hint','')}".strip()))
+        # Global forbids
         for forb in pack.forbids:
-            pat = forb.get("pattern","")
+            pat = forb.get("pattern", "")
             if pat and re.search(pat, text, flags=re.IGNORECASE):
                 finds.append(Finding(file="", page=pno, kind="Checklist", message=f"Forbidden phrase present: '{pat}'. Hint: {forb.get('hint','')}".strip()))
+        # Placeholder fields
         if "W3W:" in text and not re.search(r"W3W:\s*[a-z]+\.[a-z]+\.[a-z]+", text):
             finds.append(Finding(file="", page=pno, kind="Data", message="W3W field present but empty/invalid"))
     return finds
 
 def consistency_findings(text_pages: List[str]) -> List[Finding]:
     from rapidfuzz.distance import Levenshtein
-    toks = set()
-    for t in tokenise("\\n".join(text_pages)):
+    tokens = set()
+    for t in tokenise("\n".join(text_pages)):
         if len(t) >= 6 and any(ch.isdigit() for ch in t):
-            toks.add(t)
-    toks = list(toks)
+            tokens.add(t)
+    tokens = list(tokens)
     finds = []
-    for i, a in enumerate(toks):
-        for b in toks[i+1:]:
-            if a[0].isalpha() and b[0].isalpha():
+    for i, a in enumerate(tokens):
+        for b in tokens[i + 1:]:
+            if a and b and a[0].isalpha() and b[0].isalpha():
                 d = Levenshtein.distance(a, b)
                 if d == 1 or (d == 2 and min(len(a), len(b)) >= 8):
                     finds.append(Finding(file="", page=0, kind="Consistency", message=f"Similar model codes found: '{a}' vs '{b}'"))
@@ -213,6 +254,8 @@ def misalignment_findings(doc) -> List[Finding]:
 def audit_pdf_bytes(buf: bytes, client: str, rules_blob: Dict[str, Any]) -> Dict[str, Any]:
     packs, allowlist = compile_client_packs(rules_blob)
     client_pack = packs.get(client.upper(), ClientPack(name=client.upper()))
+
+    # Extract text
     text_pages = []
     if fitz is not None:
         try:
@@ -223,7 +266,8 @@ def audit_pdf_bytes(buf: bytes, client: str, rules_blob: Dict[str, Any]) -> Dict
     else:
         text_pages = extract_text_pdfminer(buf)
 
-    capitals = {t for t in tokenise("\\n".join(text_pages)) if t.isupper()}
+    # Build client allowlist from all-caps tokens in doc
+    capitals = {t for t in tokenise("\n".join(text_pages)) if t.isupper()}
     client_allow = set([w.lower() for w in capitals])
 
     findings = []
@@ -231,6 +275,7 @@ def audit_pdf_bytes(buf: bytes, client: str, rules_blob: Dict[str, Any]) -> Dict
     findings += checklist_findings(text_pages, client_pack)
     findings += consistency_findings(text_pages)
 
+    # Misalignment
     if fitz is not None:
         try:
             with fitz.open(stream=buf, filetype="pdf") as doc:
@@ -269,6 +314,9 @@ def write_excel_report(all_results: Dict[str, Dict[str, Any]], out_path: str):
         pd.DataFrame(perpage).to_excel(xw, sheet_name="PerPage", index=False)
 
 def handle_dwg(file_name: str, data: bytes, workdir: str) -> Optional[str]:
+    """
+    Attempt DWG→PDF via ODA File Converter if ODA_CONVERTER env var is provided.
+    """
     oda = os.environ.get("ODA_CONVERTER")
     if not oda:
         return None
@@ -286,19 +334,23 @@ def handle_dwg(file_name: str, data: bytes, workdir: str) -> Optional[str]:
         st.warning(f"DWG conversion failed: {e}")
     return None
 
-# ---- Streamlit UI ----
+# ---------- Streamlit UI ----------
 st.set_page_config(page_title="AI Design Quality Auditor", layout="wide")
 st.title("AI Design Quality Auditor")
 st.caption("Batch audit PDFs with spelling, layout, and per-client checklist rules.")
 
 with st.sidebar:
     st.header("Configuration")
-    client = st.selectbox("Client", ["EE","H3G","MBNL","VODAFONE","CUSTOM"], index=0)
-    rules_file = st.file_uploader("Rules pack (YAML)", type=["yaml","yml"], accept_multiple_files=False)
+    client = st.selectbox("Client", ["EE", "H3G", "MBNL", "VODAFONE", "CUSTOM"], index=0)
+    rules_file = st.file_uploader("Rules pack (YAML)", type=["yaml", "yml"], accept_multiple_files=False)
     run_btn = st.button("Run Audit", type="primary")
 
 st.write("### Upload files")
-uploads = st.file_uploader("Drop PDFs (and optional DWG/DXF) here", type=["pdf","dwg","dxf"], accept_multiple_files=True)
+uploads = st.file_uploader(
+    "Drop PDFs (and optional DWG/DXF) here",
+    type=["pdf", "dwg", "dxf"],
+    accept_multiple_files=True
+)
 
 if run_btn and uploads:
     rules_blob = load_rules(rules_file)
@@ -306,8 +358,10 @@ if run_btn and uploads:
     tmp = tempfile.mkdtemp(prefix="audit_")
     try:
         for upl in uploads:
-            fname = upl.name; data = upl.read()
+            fname = upl.name
+            data = upl.read()
             pdf_path = None
+
             if fname.lower().endswith(".pdf"):
                 pdf_path = os.path.join(tmp, fname)
                 with open(pdf_path, "wb") as f:
@@ -329,6 +383,7 @@ if run_btn and uploads:
             result = audit_pdf_bytes(buf, client=client, rules_blob=rules_blob)
             results[fname] = result
 
+        # Outputs
         out_dir = os.path.join(tmp, "reports"); os.makedirs(out_dir, exist_ok=True)
         excel_path = os.path.join(out_dir, "report.xlsx")
         write_excel_report(results, excel_path)
@@ -337,7 +392,6 @@ if run_btn and uploads:
         for fn, res in results.items():
             for r in res["findings"]:
                 rej_rows.append({"file": fn, **r})
-        import pandas as pd
         rej_df = pd.DataFrame(rej_rows)
         rej_csv = os.path.join(out_dir, "rejections.csv")
         rej_df.to_csv(rej_csv, index=False)
@@ -356,7 +410,9 @@ if run_btn and uploads:
         st.write("#### Findings")
         st.dataframe(pd.DataFrame(rej_rows))
     finally:
+        # Leave tmp dir for the session (easier downloads); in production you might clean up.
         pass
+
 elif run_btn and not uploads:
     st.warning("Please upload at least one file.")
 else:
