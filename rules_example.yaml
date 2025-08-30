@@ -1,0 +1,25 @@
+# ---- Starter rules for the Design QA app ----
+# Everything here is editable in-app via the "Rules" expander or by uploading a CSV.
+# Top-level sections the app understands:
+# - required_phrases: phrases that MUST appear anywhere in the PDF (or on specific pages via "page_contains")
+# - forbidden_pairs: if left contains any of the words and right contains any, raise a finding.
+# - suppress_patterns: messages (substring match) the app should ignore (learned as "Not valid").
+# - meta: optional picklist defaults for the left-side metadata form.
+
+required_phrases:
+  - text: "ALL DIMENSIONS IN MM"
+    where: "anywhere"
+
+forbidden_pairs:
+  - left: ["Brush"]
+    right: ["Generator Power", "Gen Power"]
+
+suppress_patterns: []
+
+meta:
+  clients: ["BTEE", "Vodafone", "MBNL", "H3G", "Cornerstone", "Cellnex"]
+  projects: ["RAN", "Power Resilience", "East Unwind", "Beacon 4"]
+  site_types: ["Greenfield", "Rooftop", "Streetworks"]
+  vendors: ["Ericsson", "Nokia"]
+  radio_locations: ["High Level", "Low Level", "Indoor", "Door"]
+  cabinet_locations: ["Indoor", "Outdoor"]
