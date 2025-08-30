@@ -1,8 +1,10 @@
 streamlit
 pandas
-openpyxl
 numpy
-PyMuPDF
-pyspellchecker==0.7.2
 rapidfuzz
-PyYAML
+pyyaml
+openpyxl
+PyMuPDF
+pdf2image
+pytesseract
+pyspellchecker
