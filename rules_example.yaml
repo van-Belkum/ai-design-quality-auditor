@@ -1,0 +1,9 @@
+allowlist:
+  - approx
+  - fibre
+  - telecom
+
+checklist:
+  - "ALL DIMENSIONS IN MM"
+  - "NORTH ARROW"
+  - "PROJECT TITLE"

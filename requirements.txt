@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+PyMuPDF
+openpyxl
+pyyaml
+rapidfuzz
+pdf2image
+pytesseract
+opencv-python-headless
