@@ -1,202 +1,127 @@
-# rules_example.yaml
-# Master QA ruleset for AI Design QA
-# Each section below corresponds to Audit metadata fields.
-# You can add, edit, or remove entries. The tool will learn from your updates.
+version: 1
 
-# -------------------------------------------------------------------
-# Generic checklist rules (apply to all audits, across all categories)
-# -------------------------------------------------------------------
-checklist:
-  - name: "Title block present"
-    severity: major
-    must_contain:
-      - "TITLE"
-    reject_if_present: []
+nlp:
+  fuzzy_threshold: 87
+  case_insensitive: true
 
-  - name: "Scale must be shown"
-    severity: minor
-    must_contain:
-      - "SCALE"
-    reject_if_present: []
+lookups:
+  - name: mimo_matrix
+    file: mimo_matrix.csv
+  - name: supplier_aliases
+    file: supplier_aliases.csv
+  - name: doc_clauses
+    file: doc_clauses.csv
 
-  - name: "Forbidden placeholder text"
-    severity: major
-    must_contain: []
-    reject_if_present:
-      - "LOREM IPSUM"
-      - "PLACEHOLDER"
+tokens:
+  rfts: ["right first time", "rft%", "rft percentage"]
+  title_block: ["title", "title block", "drawing number", "revision"]
 
-# -------------------------------------------------------------------
-# Client-specific rules
-# -------------------------------------------------------------------
-clients:
-  BTEE:
-    must_contain:
-      - "BT"
-    reject_if_present: []
-  Vodafone:
-    must_contain:
-      - "VODAFONE"
-    reject_if_present: []
-  MBNL:
-    must_contain:
-      - "MBNL"
-    reject_if_present: []
-  H3G:
-    must_contain:
-      - "H3G"
-    reject_if_present: []
-  Cornerstone:
-    must_contain:
-      - "CORNERSTONE"
-    reject_if_present: []
-  Cellnex:
-    must_contain:
-      - "CELLNEX"
-    reject_if_present: []
+groups:
 
-# -------------------------------------------------------------------
-# Project-specific rules
-# -------------------------------------------------------------------
-projects:
-  RAN:
-    must_contain:
-      - "RADIO ACCESS NETWORK"
-    reject_if_present: []
-  Power Resilience:
-    must_contain:
-      - "GENERATOR"
-      - "BACKUP POWER"
-    reject_if_present: []
-  East Unwind:
-    must_contain: []
-    reject_if_present: []
-  Beacon 4:
-    must_contain: []
-    reject_if_present: []
+  - id: GLOBAL_BASICS
+    name: Global Basics
+    rules:
+      - id: TITLE_BLOCK_PRESENT
+        name: Title block must be present
+        severity: major
+        source: { document: "GEN-DWG-STD-001", clause: "3.1" }
+        checks:
+          - type: must_contain_any
+            tokens: "@title_block"
+            scope: page_any
 
-# -------------------------------------------------------------------
-# Site Type-specific rules
-# -------------------------------------------------------------------
-site_types:
-  Greenfield:
-    must_contain:
-      - "TOWER"
-    reject_if_present: []
-  Rooftop:
-    must_contain:
-      - "ROOF"
-    reject_if_present: []
-  Streetworks:
-    must_contain:
-      - "STREETWORKS"
-    reject_if_present: []
+      - id: SCALE_SHOWN
+        name: Scale must be shown on first page
+        severity: minor
+        source: { document: "GEN-DWG-STD-001", clause: "3.4" }
+        checks:
+          - type: must_contain
+            token: "SCALE"
+            scope: first_page
 
-# -------------------------------------------------------------------
-# Vendor-specific rules
-# -------------------------------------------------------------------
-vendors:
-  Ericsson:
-    must_contain:
-      - "ERICSSON"
-    reject_if_present: []
-  Nokia:
-    must_contain:
-      - "NOKIA"
-    reject_if_present: []
+      - id: ADDRESS_MATCHES_TITLE
+        name: Site Address must match drawing title (ignore “, 0 ,”)
+        severity: major
+        source: { document: "GEN-DWG-STD-002", clause: "2.2" }
+        conditions:
+          all:
+            - field: site_address
+              not_in: ["", "0", "0, 0"]
+        checks:
+          - type: title_contains_site_address_normalized
+            normalizers: ["strip_commas", "squash_spaces", "upper"]
 
-# -------------------------------------------------------------------
-# Cabinet Location-specific rules
-# -------------------------------------------------------------------
-cabinet_locations:
-  Indoor:
-    must_contain:
-      - "INDOOR"
-    reject_if_present: []
-  Outdoor:
-    must_contain:
-      - "OUTDOOR"
-    reject_if_present: []
+  - id: CLIENT_SPECIFIC
+    name: Client / Project specific
+    rules:
+      # Example placeholder: copy this structure for real rules
+      - id: BTEE_PWRRES_NO_MIMO_REQUIRED
+        name: MIMO config optional for Power Resilience
+        severity: info
+        source: { document: "BTEE-PR-POW-001", clause: "2.1" }
+        conditions:
+          all:
+            - field: client
+              eq: "BTEE"
+            - field: project
+              eq: "Power Resilience"
+        checks:
+          - type: suppress_field_required
+            field: mimo_required
 
-# -------------------------------------------------------------------
-# Radio Location-specific rules
-# -------------------------------------------------------------------
-radio_locations:
-  High Level:
-    must_contain:
-      - "HIGH LEVEL"
-    reject_if_present: []
-  Low Level:
-    must_contain:
-      - "LOW LEVEL"
-    reject_if_present: []
-  Indoor:
-    must_contain:
-      - "INDOOR"
-    reject_if_present: []
-  Door:
-    must_contain:
-      - "DOOR"
-    reject_if_present: []
+      - id: VODAFONE_GF_LABEL
+        name: Vodafone Greenfield earthing label wording
+        severity: major
+        source: { document: "VF-ELEC-STD-004", clause: "5.2" }
+        conditions:
+          all:
+            - field: client
+              eq: "Vodafone"
+            - field: site_type
+              eq: "Greenfield"
+        checks:
+          - type: must_contain
+            token: "EARTH BAR CONNECTION LABEL: DO NOT REMOVE"
+            scope: page_any
 
-# -------------------------------------------------------------------
-# Sector count-specific rules
-# -------------------------------------------------------------------
-sectors:
-  "1":
-    must_contain: []
-    reject_if_present: []
-  "2":
-    must_contain: []
-    reject_if_present: []
-  "3":
-    must_contain: []
-    reject_if_present: []
-  "4":
-    must_contain: []
-    reject_if_present: []
-  "5":
-    must_contain: []
-    reject_if_present: []
-  "6":
-    must_contain: []
-    reject_if_present: []
+  - id: MIMO_POLICY
+    name: MIMO policy derived from lookups
+    rules:
+      - id: DEFAULT_MIMO_BY_VENDOR
+        name: Default MIMO string must match vendor/sector policy
+        severity: major
+        source: { document: "RAN-MIMO-POL-001", clause: "Table 2" }
+        conditions:
+          all:
+            - field: project
+              in: ["RAN", "Beacon 4"]
+            - field: sectors_qty
+              in: [1, 2, 3, 4, 5, 6]
+            - field: proposed_vendor
+              in: ["Ericsson", "Nokia"]
+        checks:
+          - type: campo_equals_lookup
+            compare:
+              field: mimo_s1
+              lookup: mimo_matrix
+              where:
+                vendor: "${proposed_vendor}"
+                sectors_qty: "${sectors_qty}"
+              equals_column: default_mimo
+          - type: copy_if_same_all
+            field_from: mimo_s1
+            fields_to: ["mimo_s2","mimo_s3","mimo_s4","mimo_s5","mimo_s6"]
+            enabled_if:
+              field: mimo_same_all
+              eq: true
 
-# -------------------------------------------------------------------
-# Supplier-specific rules
-# -------------------------------------------------------------------
-suppliers:
-  CEG:
-    must_contain: []
-    reject_if_present: []
-  CTIL:
-    must_contain: []
-    reject_if_present: []
-  Emfyser:
-    must_contain: []
-    reject_if_present: []
-  Innov8:
-    must_contain: []
-    reject_if_present: []
-  Invict:
-    must_contain: []
-    reject_if_present: []
-  KTL Team (Internal):
-    must_contain: []
-    reject_if_present: []
-  Trylon:
-    must_contain: []
-    reject_if_present: []
-
-# -------------------------------------------------------------------
-# Drawing Type-specific rules
-# -------------------------------------------------------------------
-drawing_types:
-  General Arrangement:
-    must_contain:
-      - "GA"
-    reject_if_present: []
-  Detailed Design:
-    must_contain:
-      - "DD"
-    reject_if_present: []
+  - id: TYPOS_AND_CODES
+    name: Typos and code normalization
+    rules:
+      - id: DENY_AHEGC
+        name: Forbid AHEGC (use AHEGG instead)
+        severity: minor
+        source: { document: "CTIL-CODELIST-2024", clause: "Annex A" }
+        checks:
+          - type: must_not_contain
+            token: "AHEGC"
