@@ -7,6 +7,6 @@ pdfminer.six
 opencv-python-headless
 pyspellchecker==0.7.2
 rapidfuzz
-PyYAML
 pytesseract
 pdf2image
+PyYAML
