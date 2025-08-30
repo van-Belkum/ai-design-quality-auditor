@@ -1,3 +1,6 @@
-kind,message,disposition
-Spelling,Possible typo: 'utilise' -> 'utilize',Not Valid
-Checklist,Missing required text: 'ALL DIMENSIONS IN MM',Valid
+category,rule_text,valid
+Checklist,ALL DIMENSIONS IN MM,1
+Checklist,NORTH ARROW,1
+Checklist,PROJECT TITLE,1
+Spelling,approx,1
+Spelling,fibre,1
