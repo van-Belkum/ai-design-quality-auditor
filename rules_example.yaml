@@ -1,11 +1,11 @@
 version: 2
+
 allowlist:
   - utilise
   - utilised
   - fenceline
 
-# Simple suppressions are stored in history/suppressions.json at runtime.
-
+# Rule checks
 checks:
   # Always present somewhere in the doc
   - type: include_text
@@ -28,17 +28,17 @@ checks:
       project: ["Beacon 4"]
     severity: low
 
-  # Regex must appear on any page (e.g., Title block date)
+  # Regex must appear (e.g., Title block date)
   - type: regex_must
     id: TITLE-DATE
-    regex: "Date:\s*\d{2}[./-]\d{2}[./-]\d{4}"
+    regex: 'Date:\s*\d{2}[./-]\d{2}[./-]\d{4}'
     hint: "Expected a date like 01.09.2025 in title block"
     severity: medium
 
   # Regex forbidden anywhere
   - type: regex_forbid
     id: TBC-FORBID
-    regex: "\bTBC\b"
+    regex: '\bTBC\b'
     hint: "TBC not allowed in issued designs"
     severity: high
 
@@ -56,5 +56,5 @@ checks:
     text: "NOKIA INDOOR CABINET"
     when:
       vendor: ["Nokia"]
-      site_type: ["Indoor"]  # site_type is Greenfield/Rooftop/Streetworks; demo only
+      site_type: ["Indoor"]   # just a demo, site_type is Greenfield/Rooftop/Streetworks
     severity: low
