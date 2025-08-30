@@ -4,8 +4,9 @@ openpyxl
 numpy
 PyMuPDF
 pdfminer.six
-opencv-python
+opencv-python-headless
 pyspellchecker
 rapidfuzz
 pytesseract
 pdf2image
+PyYAML
