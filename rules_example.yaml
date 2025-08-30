@@ -1,145 +1,61 @@
-# Example rules file for AI Design QA
-# You can add as many rules as you want. Edits take effect on next run.
+metadata_rules:
+  client:
+    enabled: true
+    required: true
+    allowed: ["BTEE","Vodafone","MBNL","H3G","Cornerstone","Cellnex"]
+  project:
+    enabled: true
+    required: true
+    allowed: ["RAN","Power Resilience","East Unwind","Beacon 4"]
+  site_type:
+    enabled: true
+    required: true
+    allowed: ["Greenfield","Rooftop","Streetworks"]
+  vendor:
+    enabled: true
+    required: true
+    allowed: ["Ericsson","Nokia"]
+  cabinet_location:
+    enabled: true
+    required: true
+    allowed: ["Indoor","Outdoor"]
+  radio_location:
+    enabled: true
+    required: true
+    allowed: ["High Level","Low Level","Indoor and Door"]
+  sectors:
+    enabled: true
+    required: true
+    min: 1
+    max: 6
+  mimo_config:
+    enabled: true
+    required_unless_project_is: "Power Resilience"
+    allowed_examples:
+      - "18\\21\\26 @4x4; 70\\80 @2x2"
+  site_address:
+    enabled: true
+    required: true
 
-# 1) Spelling settings
+  supplier:
+    enabled: true
+    required: true
+    allowed: ["CEG","CTIL","Emfyser","Innov8","Invict","KTL Team (Internal)","Trylon","Other"]
+
+  drawing_type:
+    enabled: true
+    required: true
+    allowed: ["General Arrangement","Detailed Design"]
+
 spelling:
-  # OPTIONAL: allow-list of tokens that should never be flagged by the (very conservative) spelling check.
   allow:
-    - MIMO
+    - existing
+    - site
+    - antenna
+    - feeder
     - Ericsson
     - Nokia
+    - GA
     - RAN
-    - Rooftop
-    - Streetworks
-    - Greenfield
-    - Beacon
-    - Power
-    - Resilience
-    - BTEE
     - MBNL
-    - H3G
-    - Cellnex
-    - Cornerstone
-
-# 2) Checklist / content rules
-# Each child key is a rule "id". Set enabled: false to disable.
-# Optional scoping via "scope": any of these keys may be used to limit when the rule applies.
-#   scope:
-#     client: [BTEE, Vodafone, ...]
-#     project: [RAN, Power Resilience, East Unwind, Beacon 4]
-#     vendor: [Ericsson, Nokia]
-#     site_type: [Greenfield, Rooftop, Streetworks]
-#     cabinet: [Indoor, Outdoor]
-#     radio: [High Level, Low Level, Indoor and Door]
-#     sectors: [1,2,3,4,5,6]
-#
-# Matching:
-#   - keywords:         (all must be present, case-insensitive)
-#   - any_keywords:     (at least one must be present)
-#   - not_keywords:     (none may be present)
-#   - regex:            (single regex string or list; ALL must match)
-#
-# If ANY page fails the rule, a finding will be listed for that page.
-
-checklist:
-
-  dim_units_in_mm:
-    enabled: true
-    kind: Checklist
-    message: "Missing required text: 'ALL DIMENSIONS IN MM'"
-    # applies to all clients/projects unless scoped:
-    scope: {}
-    any_keywords:
-      - "ALL DIMENSIONS IN MM"
-
-  title_block_present:
-    enabled: true
-    kind: Checklist
-    message: "Title block / project information missing."
-    scope: {}
-    any_keywords:
-      - "Project"
-      - "Client"
-      - "Site"
-      - "Drawing"
-
-  client_specific_note:
-    enabled: false
-    kind: Checklist
-    message: "Required BTEE client note is missing."
-    scope:
-      client: [BTEE]
-    any_keywords:
-      - "BTEE"
-      - "British Telecommunications"
-
-  vendor_ericsson_phrase:
-    enabled: false
-    kind: Checklist
-    message: "Ericsson install note not found."
-    scope:
-      vendor: [Ericsson]
-    any_keywords:
-      - "install"
-      - "ericsson"
-
-  rooftop_safety_note:
-    enabled: false
-    kind: Checklist
-    message: "Rooftop safety note missing."
-    scope:
-      site_type: [Rooftop]
-    any_keywords:
-      - "safety"
-      - "harness"
-      - "edge protection"
-
-  power_resilience_excludes_mimo:
-    enabled: true
-    kind: Checklist
-    message: "MIMO configuration text should not appear for Power Resilience."
-    scope:
-      project: ["Power Resilience"]
-    not_keywords:
-      - "MIMO"
-      - "x x"   # example pattern; adjust as needed
-
-  sector_count_3_expected_text:
-    enabled: false
-    kind: Checklist
-    message: "Expected 3-sector design text missing."
-    scope:
-      sectors: [3]
-    any_keywords:
-      - "3 sector"
-      - "tri-sector"
-
-  indoor_cabinet_label:
-    enabled: false
-    kind: Checklist
-    message: "Indoor cabinet label missing."
-    scope:
-      cabinet: [Indoor]
-    any_keywords:
-      - "INDOOR CABINET"
-      - "IC"
-
-  radio_high_level_label:
-    enabled: false
-    kind: Checklist
-    message: "High Level radio label missing."
-    scope:
-      radio: ["High Level"]
-    any_keywords:
-      - "HIGH LEVEL RADIO"
-      - "HLR"
-
-  # Regex example (ALL regex patterns must match the page text)
-  drawing_has_revision_and_date:
-    enabled: true
-    kind: Checklist
-    message: "Missing REV and DATE in title area."
-    scope: {}
-    regex:
-      - "(REV|Revision)\\s*[:\\-]?\\s*[A-Z0-9]+"
-      - "(DATE)\\s*[:\\-]?\\s*\\d{2}[\\-/]\\d{2}[\\-/]\\d{2,4}"
+    - CTIL
