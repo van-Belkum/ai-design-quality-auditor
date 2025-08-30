@@ -1,4 +1,4 @@
-import os, io, re, json, tempfile
+import os, io, re, json, tempfile, zipfile
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
@@ -209,10 +209,9 @@ def checklist_findings(pages, pack: Optional[ClientPack], rules_blob: Dict[str, 
 def roster_findings(filename, pages, roster_df):
     finds=[]
     if roster_df is None or roster_df.empty: return finds
-    base=os.path.splitext(os.path.basename(filename))[0]
     full_text="\n".join(p["text"] for p in pages)
     row=roster_df.iloc[0].fillna("")
-    # very lightweight starters
+    # lightweight starters
     if row.get("site_name") and row["site_name"].lower() not in full_text.lower():
         finds.append(Finding(filename,0,"Data",f"site_name mismatch: expected '{row['site_name']}'"))
     if row.get("postcode"):
@@ -281,10 +280,120 @@ def record_history(user: str, stage: str, client: str, results: dict) -> pd.Data
         df = df_new
     return df
 
+# ---------------- Learning / Manual QA ----------------
+def learn_from_feedback(fb_df: pd.DataFrame, rules_blob: dict, immediate_disable: bool = True):
+    """
+    Use a findings CSV labeled with 'Valid'/'Not Valid' to evolve rules:
+      - Spelling + Not Valid -> add the word to allowlist.
+      - Checklist + Not Valid with [RULE_ID] in message -> disable that rule (immediately or after 3 strikes).
+    """
+    # pick a column that has 'Valid' in name or values
+    label_col = None
+    for c in fb_df.columns:
+        if "valid" in str(c).lower() or fb_df[c].astype(str).str.contains("Valid", case=False, na=False).any():
+            label_col = c; break
+    if not label_col:
+        st.warning("No 'Valid/Not Valid' column found — nothing learned.")
+        return rules_blob
+
+    labels = fb_df[label_col].astype(str).str.strip().str.lower()
+
+    # Spelling: allowlist
+    mask_spell = (fb_df["kind"].astype(str) == "Spelling") & (labels == "not valid")
+    to_allow = set()
+    for msg in fb_df.loc[mask_spell, "message"].dropna().astype(str):
+        m = re.search(r"Possible typo:\s*'([^']+)'", msg)
+        if m and len(m.group(1)) >= 3:
+            to_allow.add(m.group(1).lower())
+    if to_allow:
+        rules_blob.setdefault("allowlist", [])
+        rules_blob["allowlist"] = sorted(set(w.lower() for w in rules_blob["allowlist"]) | to_allow)
+
+    # Checklist: disable rule by [RULE_ID]
+    mask_chk = (fb_df["kind"].astype(str) == "Checklist") & (labels == "not valid")
+    if mask_chk.any():
+        fb_df = fb_df.copy()
+        fb_df["rule_id"] = fb_df["message"].astype(str).str.extract(r"\[([A-Za-z0-9\-_]+)\]")
+        counts = fb_df.loc[mask_chk, "rule_id"].value_counts()
+        for rid, n in counts.items():
+            if not rid:
+                continue
+            if immediate_disable or n >= 3:
+                for client in rules_blob.get("clients", []):
+                    client["page_rules"] = [r for r in client.get("page_rules", []) if r.get("id") != rid]
+
+    return rules_blob
+
+def apply_manual_qa(manual_df: pd.DataFrame, rules_blob: dict):
+    """
+    template_manual_qa.csv columns:
+      client, rule_type, pattern, rule_id, when_page_contains, hint, a, b
+    rule_type in {allowlist, forbid, require_regex, forbid_regex, mutual_exclusion, disable_rule}
+    """
+    rules_blob.setdefault("clients", [])
+    idx = {c["name"].upper(): i for i, c in enumerate(rules_blob["clients"]) if "name" in c}
+
+    def get_client(name: str):
+        name = (name or "GLOBAL").upper()
+        if name not in idx:
+            rules_blob["clients"].append({"name": name, "global_includes": [], "forbids": [], "page_rules": []})
+            idx[name] = len(rules_blob["clients"]) - 1
+        return rules_blob["clients"][idx[name]]
+
+    for _, r in manual_df.fillna("").iterrows():
+        client = r.get("client", "GLOBAL")
+        rtype = str(r.get("rule_type", "")).lower()
+        pattern = str(r.get("pattern", ""))
+        rule_id = str(r.get("rule_id", "") or f"MANUAL-{abs(hash(pattern))%100000}")
+        wpc = str(r.get("when_page_contains", "") or None)
+        hint = str(r.get("hint", ""))
+        a = str(r.get("a", "")); b = str(r.get("b", ""))
+
+        if rtype == "allowlist":
+            rules_blob.setdefault("allowlist", [])
+            rules_blob["allowlist"] = sorted(set(rules_blob["allowlist"]) | {pattern.lower()})
+            continue
+
+        if rtype == "mutual_exclusion":
+            if a and b:
+                rules_blob.setdefault("mutual_exclusive", []).append({"a": a, "b": b})
+            continue
+
+        targets = rules_blob["clients"] if client.upper() == "GLOBAL" else [get_client(client)]
+
+        if rtype == "disable_rule":
+            for t in targets:
+                t["page_rules"] = [pr for pr in t.get("page_rules", []) if pr.get("id") != rule_id]
+            continue
+
+        if rtype == "forbid":
+            for t in targets:
+                t.setdefault("forbids", []).append({"pattern": pattern, "hint": hint})
+            continue
+
+        if rtype in ("require_regex", "forbid_regex"):
+            for t in targets:
+                pr_list = t.setdefault("page_rules", [])
+                # upsert a page rule with this id
+                pr = None
+                for x in pr_list:
+                    if x.get("id") == rule_id and x.get("when_page_contains") == wpc:
+                        pr = x; break
+                if pr is None:
+                    pr = {"id": rule_id, "when_page_contains": wpc, "must_include_regex": [], "forbids": []}
+                    pr_list.append(pr)
+                if rtype == "require_regex":
+                    pr.setdefault("must_include_regex", []).append(pattern)
+                else:
+                    pr.setdefault("forbids", []).append({"pattern": pattern, "hint": hint})
+            continue
+
+    return rules_blob
+
 # ---------------- UI ----------------
 st.set_page_config(page_title="AI Design QA — Learn v5.1", layout="wide")
 st.title("AI Design Quality Auditor — Learn v5.1")
-st.caption("OCR, PDF markups, Excel, history logging, PASS/REJECTED banner.")
+st.caption("OCR, PDF markups, Excel, history logging, PASS/REJECTED banner, learning & manual QA.")
 
 with st.sidebar:
     st.header("Configuration")
@@ -292,7 +401,7 @@ with st.sidebar:
     rules_file = st.file_uploader("Rules pack (YAML)", type=["yaml","yml"])
 
     st.divider(); st.subheader("Reference data")
-    roster_csv = st.file_uploader("Site roster CSV", type=["csv"])
+    roster_csv = st.file_uploader("Site roster CSV (optional)", type=["csv"])
 
     st.divider(); st.subheader("Outputs")
     gen_markups = st.checkbox("Generate marked-up PDFs (highlights + notes)", value=True)
@@ -301,18 +410,53 @@ with st.sidebar:
     qa_user  = st.text_input("Your name / initials", value="")
     qa_stage = st.selectbox("Stage", ["First Check","Second Check","Final Sign-off"], index=0)
 
+    st.divider(); st.subheader("Manual QA → Rules")
+    manual_csv = st.file_uploader("Manual QA CSV", type=["csv"])
+    apply_manual_btn = st.button("Apply Manual QA to rules")
+
+    st.divider(); st.subheader("Learn from labeled findings")
+    fb_csv = st.file_uploader("Findings CSV (with Valid/Not Valid)", type=["csv"])
+    immediate_disable = st.checkbox("Disable checklist rules immediately when Not Valid", value=True)
+    learn_btn = st.button("Apply learning to rules")
+
     run_btn = st.button("Run Audit", type="primary")
 
 # load rules
 rules_blob = load_rules(rules_file)
+
+# --- Apply Manual QA CSV to rules ---
+if apply_manual_btn and manual_csv is not None:
+    try:
+        mdf = pd.read_csv(manual_csv)
+    except Exception:
+        manual_csv.seek(0); mdf = pd.read_excel(manual_csv)
+    rules_blob = apply_manual_qa(mdf, rules_blob)
+    import yaml
+    buf = io.StringIO()
+    yaml.safe_dump(rules_blob, buf, sort_keys=False, allow_unicode=True)
+    st.success("Manual QA applied. Download updated rules below.")
+    st.download_button("Download updated rules (Manual QA)", data=buf.getvalue().encode("utf-8"),
+                       file_name="rules_manual.yaml")
+
+# --- Learn from labeled findings (Valid / Not Valid) ---
+if learn_btn and fb_csv is not None:
+    try:
+        fdf = pd.read_csv(fb_csv)
+    except Exception:
+        fb_csv.seek(0); fdf = pd.read_excel(fb_csv)
+    rules_blob = learn_from_feedback(fdf, rules_blob, immediate_disable=immediate_disable)
+    import yaml
+    buf = io.StringIO()
+    yaml.safe_dump(rules_blob, buf, sort_keys=False, allow_unicode=True)
+    st.success("Learning applied. Download updated rules below.")
+    st.download_button("Download updated rules (Learning)", data=buf.getvalue().encode("utf-8"),
+                       file_name="rules_learned.yaml")
 
 def _load_csv(u):
     if u is None: return None
     try: return pd.read_csv(u)
     except Exception:
         u.seek(0); return pd.read_excel(u)
-
-roster_df = None
 
 uploads = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
 
@@ -358,6 +502,17 @@ if run_btn and uploads:
     st.success("Audit complete.")
     st.download_button("Download Excel report", data=open(excel_path,"rb").read(), file_name="report.xlsx")
 
+    # Optional annotated PDFs
+    if gen_markups and fitz is not None:
+        zip_path = os.path.join(tmp, "annotated_pdfs.zip")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for fn,res in results.items():
+                annotated = annotate_pdf(pdf_bytes[fn], res["findings"])
+                outp = os.path.join(tmp, f"{os.path.splitext(fn)[0]}_annotated.pdf")
+                open(outp,"wb").write(annotated)
+                z.write(outp, arcname=os.path.basename(outp))
+        st.download_button("Download annotated PDFs (zip)", data=open(zip_path,"rb").read(), file_name="annotated_pdfs.zip")
+
     overall_total = sum(sum_row.get("Spelling",0)+sum_row.get("Checklist",0)+sum_row.get("Consistency",0)
                         +sum_row.get("Data",0)+sum_row.get("Structural",0)+sum_row.get("Electrical",0)
                         +sum_row.get("Cooling",0) for sum_row in sum_rows)
@@ -377,6 +532,53 @@ if run_btn and uploads:
         st.download_button("Download full audit history CSV", data=open(LOG_CSV,"rb").read(), file_name="audit_history.csv")
     except Exception:
         pass
+
+    # ---- Promote findings to rules (workbench) ----
+    st.write("### Promote selected findings → rules")
+    if det_rows:
+        df_find = pd.DataFrame(det_rows)
+        choices = df_find["message"].dropna().unique().tolist()
+        pick = st.multiselect("Pick finding messages", choices)
+        rule_type = st.selectbox("Rule type", ["allowlist (spelling)", "forbid (phrase)", "require_regex (enter regex below)", "mutual_exclusion"])
+        extra = st.text_input("Extra (regex pattern or 'A,B' for exclusion)")
+        if st.button("Create rules from selection"):
+            import yaml
+            blob = rules_blob.copy()
+            blob.setdefault("clients", [])
+
+            if rule_type == "allowlist (spelling)":
+                blob.setdefault("allowlist", [])
+                for m in pick:
+                    m2 = re.search(r"Possible typo:\s*'([^']+)'", m)
+                    if m2:
+                        blob["allowlist"].append(m2.group(1).lower())
+                blob["allowlist"] = sorted(set(blob["allowlist"]))
+
+            elif rule_type == "forbid (phrase)":
+                phrase = extra.strip()
+                if phrase:
+                    for c in blob.get("clients", []):
+                        c.setdefault("forbids", []).append({"pattern": phrase, "hint": ""})
+
+            elif rule_type == "require_regex (enter regex below)":
+                rx = extra.strip()
+                if rx:
+                    for c in blob.get("clients", []):
+                        c.setdefault("page_rules", []).append(
+                            {"id": "WB-RULE", "when_page_contains": None, "must_include_regex": [rx], "forbids": []}
+                        )
+
+            elif rule_type == "mutual_exclusion":
+                parts = [p.strip() for p in (extra or "").split(",")]
+                if len(parts) == 2:
+                    blob.setdefault("mutual_exclusive", []).append({"a": parts[0], "b": parts[1]})
+
+            out = io.StringIO()
+            yaml.safe_dump(blob, out, sort_keys=False, allow_unicode=True)
+            st.download_button("Download rules from selection", data=out.getvalue().encode("utf-8"),
+                               file_name="rules_from_rows.yaml")
+    else:
+        st.caption("Run an audit to enable promoting findings to rules.")
 
 else:
     st.info("Upload rules/roster (optional), then add PDFs and click Run Audit.")
