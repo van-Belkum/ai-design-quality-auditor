@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 from spellchecker import SpellChecker
 import streamlit as st
 
-APP_VERSION = "rules-engine-v5-full"
+APP_VERSION = "rules-engine-v6-full"
 
 # ---------------- LOGO (top-right, always visible) ----------------
 logo_path = "212BAAC2-5CB6-46A5-A53D-06497B78CF23.png"
+
 if os.path.exists(logo_path):
     with open(logo_path, "rb") as f:
         logo_base64 = base64.b64encode(f.read()).decode()
@@ -33,6 +34,8 @@ if os.path.exists(logo_path):
         """,
         unsafe_allow_html=True,
     )
+else:
+    st.sidebar.warning("⚠️ Logo file not found, place it in app root.")
 
 # ---------------- Persistence ----------------
 def ensure_history():
@@ -129,19 +132,27 @@ def run_rules(rules: dict, pages: list, doc, meta: dict) -> list:
 
     return findings
 
-# ---------------- Checks ----------------
+# ---------------- Spelling ----------------
 def spelling_checks(pages, allowlist:set):
     sp = SpellChecker(distance=1)
     out=[]
     for i, page in enumerate(pages, start=1):
         for w in re.findall(r"[A-Za-z][A-Za-z'\-]{1,}", page):
             wl=w.lower()
-            if wl in allowlist or wl in sp: continue
-            sug = next(iter(sp.candidates(wl)), None)
-            if sug and sug != wl:
-                out.append({"page":i,"kind":"Spelling","rule_id":"SPELL",
-                            "message":f"Possible typo: '{w}'→'{sug}'",
-                            "severity":"low","term":w})
+            if wl in allowlist or wl in sp: 
+                continue
+            # --- Safe suggestion lookup ---
+            cands=[]
+            try:
+                cands=list(sp.candidates(wl) or [])
+            except Exception:
+                cands=[]
+            if cands:
+                sug=cands[0]
+                if sug and sug != wl:
+                    out.append({"page":i,"kind":"Spelling","rule_id":"SPELL",
+                                "message":f"Possible typo: '{w}'→'{sug}'",
+                                "severity":"low","term":w})
     return out
 
 # ---------------- Annotation ----------------
@@ -261,4 +272,5 @@ st.subheader("History")
 try:
     hist=pd.read_csv(os.path.join("history","audit_log.csv"))
     st.dataframe(hist)
-except: st.info("No history yet")
+except: 
+    st.info("No history yet")
