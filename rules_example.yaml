@@ -1,6 +1,5 @@
 version: 2
 
-# Words that should never be flagged by the spell checker
 allowlist:
   - singlemode
   - BBU
@@ -11,23 +10,10 @@ allowlist:
   - gNodeB
   - MIMO
 
-# Pairs that must not co‑exist anywhere in a drawing
 mutual_exclusive:
   - { a: "Brush", b: "Generator Power" }
 
-# Metadata‑aware rules
-# Each rule may specify:
-#   id: unique id
-#   category: one of [Checklist, Data, Structural, Electrical, Cooling, Consistency, Spelling]
-#   when: (optional) filter by audit metadata; any omitted field is a wildcard
-#   checks:
-#     on_page_contains: (optional) only run checks on pages containing this snippet
-#     require_text:     list of exact strings that must appear
-#     require_regex:    list of regex patterns that must match
-#     forbid:           list of {pattern, hint} phrases that must not appear
 rules:
-
-  # Global note required for all drawings
   - id: GLOBAL-DIM-NOTE
     category: Checklist
     when: {}
@@ -35,7 +21,6 @@ rules:
       require_text:
         - "ALL DIMENSIONS IN MM"
 
-  # Title block date format for BTEE on RAN and Power Resilience projects
   - id: EE-TITLE-BLOCK-DATE
     category: Data
     when:
@@ -46,7 +31,6 @@ rules:
       require_regex:
         - "Date:\s*\d{2}\.\d{2}\.\d{4}"
 
-  # Forbid common phrasing error for BTEE
   - id: EE-FORBID-PHRASE
     category: Consistency
     when:
@@ -56,7 +40,6 @@ rules:
         - pattern: "by others as par"
           hint: "Did you mean 'by others as part'?"
 
-  # Nokia outdoor cabinets must be labelled correctly
   - id: NOKIA-CAB-OUTDOOR-LABEL
     category: Structural
     when:
@@ -66,7 +49,6 @@ rules:
       require_text:
         - "Outdoor-rated cabinet"
 
-  # Ericsson rooftop installs must show tie-off points
   - id: ERICSSON-ROOFTOP-TIEOFF
     category: Structural
     when:
@@ -77,7 +59,6 @@ rules:
         - "Contractor tie-off point"
         - "Fall arrest system"
 
-  # Beacon 4: require configuration call-out
   - id: BEACON4-CONFIG-CALLOUT
     category: Checklist
     when:
@@ -85,3 +66,11 @@ rules:
     checks:
       require_regex:
         - "Config(uration)?:\s*[A-Za-z0-9\-_/]+"
+
+  - id: RADIO-HIGHLEVEL-MIMO
+    category: Electrical
+    when:
+      radio_loc: [High Level]
+    checks:
+      require_regex:
+        - "MIMO:\s*(\d+x\d+|[1-8]x[1-8])"
