@@ -1,12 +1,9 @@
 streamlit
 pandas
-openpyxl
 numpy
-PyMuPDF
-pdfminer.six
-opencv-python-headless
-pyspellchecker==0.7.2
 rapidfuzz
-pytesseract
+pyyaml
+openpyxl
+PyMuPDF
 pdf2image
-PyYAML
+pytesseract
