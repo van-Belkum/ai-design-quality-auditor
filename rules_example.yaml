@@ -79,3 +79,84 @@ clients:
   - pattern: by others as par
     hint: Did you mean "by others as part"?
   page_rules: []
+version: 1
+allowlist:
+- agl
+- approx
+- backfilled
+- baseband
+- bbu
+- bob
+- braham
+- brickwork
+- broughton
+- chamfer
+- combiner
+- dcdu
+- dimensioned
+- dvb
+- ehybrid
+- embedment
+- ers
+- eyebolt
+- fasteners
+- fcc
+- flexi
+- galv
+- galvafroid
+- galvanizing
+- gantry
+- grillage
+- gusset
+- h3g
+- henley
+- ief
+- incomer
+- indicatively
+- inflight
+- inst
+- ipf
+- isolator
+- kathrein
+- kva
+- laitence
+- locknuts
+- lockwashers
+- mafi
+- mbnl
+- mountable
+- nmm
+- nokia
+- nrec
+- panhead
+- polarium
+- rectifier
+- rectifiers
+- rosenberger
+- scabbled
+- scabbling
+- shims
+- singlemode
+- steelwork
+- stepdown
+- studdings
+- swiftrack
+- traffolyte
+- trunking
+- weatherproof
+- widnes
+- www
+- ø300
+- ø600
+mutual_exclusive:
+- a: Brush
+  b: Generator Power
+clients:
+- name: EE
+  global_includes:
+  - ALL DIMENSIONS IN MM
+  - DETAILED DESIGN
+  forbids:
+  - pattern: by others as par
+    hint: Did you mean "by others as part"?
+  page_rules: []
