@@ -14,27 +14,27 @@ allowlist:
 clients:
   - name: EE
     global_includes:
-      - "ALL DIMENSIONS IN MM"
-      - "DETAILED DESIGN"
+      - 'ALL DIMENSIONS IN MM'
+      - 'DETAILED DESIGN'
     forbids:
-      - pattern: "by others as par"
-        hint: "Did you mean 'by others as part'?"
-      - pattern: "\b(realy)\b"
-        hint: "Probably 'relay'."
+      - pattern: 'by others as par'
+        hint: 'Did you mean "by others as part"?'
+      - pattern: '\b(realy)\b'
+        hint: 'Probably "relay".'
     page_rules:
       - id: EE-TITLE-BLOCK
-        when_page_contains: "Title:"
+        when_page_contains: 'Title:'
         must_include_regex:
-          - "Date:\s*\d{2}\.\d{2}\.\d{4}"
-          - "Purpose of Issue:\s*.+"
+          - 'Date:\s*\d{2}\.\d{2}\.\d{4}'
+          - 'Purpose of Issue:\s*.+'
       - id: EE-W3W
-        when_page_contains: "W3W:"
+        when_page_contains: 'W3W:'
         must_include_regex:
-          - "W3W:\s*[a-z]+\.[a-z]+\.[a-z]+"
-        hint: "Add a valid what3words (e.g., word.word.word)."
+          - 'W3W:\s*[a-z]+\.[a-z]+\.[a-z]+'
+        hint: 'Add a valid what3words (e.g., word.word.word).'
   - name: H3G
     global_includes:
-      - "INFLIGHT"
+      - 'INFLIGHT'
     forbids: []
     page_rules: []
   - name: MBNL
