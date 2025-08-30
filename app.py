@@ -1,4 +1,3 @@
-\
 import re
 import io
 import os
@@ -14,7 +13,7 @@ import yaml
 import fitz  # PyMuPDF
 from spellchecker import SpellChecker
 
-APP_VERSION = "v7-pre-mimo-stable"
+APP_VERSION = "v7-pre-mimo-stable-patch"
 
 # ---------------------------- Utils ----------------------------
 
@@ -97,7 +96,10 @@ def spell_findings(pages: List[str], allowlist: set) -> List[Dict[str, Any]]:
                 continue
             if wl in sp:
                 continue
-            candidates = sp.candidates(wl)
+            try:
+                candidates = sp.candidates(wl) or []
+            except Exception:
+                candidates = []
             suggestion = next(iter(candidates), None)
             if suggestion and suggestion != wl:
                 findings.append({
@@ -151,7 +153,7 @@ def apply_suppressions(df: pd.DataFrame, sup: dict) -> pd.DataFrame:
 
 st.set_page_config(page_title="AI Design QA (stable)", layout="wide")
 st.title("AI Design Quality Auditor")
-st.caption(f"Stable build {APP_VERSION} — pre‑MIMO changes")
+st.caption(f"Stable build {APP_VERSION} — pre-MIMO changes")
 
 col_left, col_right = st.columns([2,1])
 
@@ -247,4 +249,3 @@ st.download_button("Download quick_rules_template.csv", data=open("quick_rules_t
 
 st.subheader("Current suppressions")
 st.code(json.dumps(read_suppressions(), indent=2))
-
