@@ -5,6 +5,3 @@ rapidfuzz
 pyyaml
 openpyxl
 PyMuPDF
-pdf2image
-pytesseract
-opencv-python
