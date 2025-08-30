@@ -1,820 +1,703 @@
 # app.py
-# AI Design Quality Auditor – full refreshed build
-# Features:
-# - Persistent outputs (/outputs), 14-day retention (configurable)
-# - Midnight UK daily backup (/backups) with history CSV + outputs
-# - UI visibility window (default 24h)
-# - History with downloads, exclude toggle
-# - Supplier & Drawing Type mandatory; Power Resilience hides MIMO field
-# - Address/title match validation (ignores ", 0 ,")
-# - Logo fixed top-right
-# - PDF annotations + Excel report
-# - Simple rule text area (password gated) – saves to rules_example.yaml
-
-import os, io, re, json, zipfile
-from pathlib import Path
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from __future__ import annotations
+import os, io, re, json, base64, textwrap, hashlib, time, shutil
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any, Tuple, Optional
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yaml
 
-import fitz  # PyMuPDF
+# Heavy deps guarded (fitz may not be available locally)
+try:
+    import fitz  # PyMuPDF
+except Exception:
+    fitz = None
 
-from rapidfuzz import fuzz
+from rapidfuzz import process, fuzz
 
-# -----------------------------
-# Constants & paths
-# -----------------------------
-LONDON_TZ = ZoneInfo("Europe/London")
+# ========== CONSTANTS / PATHS ==========
+APP_TITLE = "AI Design Quality Auditor"
+PASSWORD = "vanB3lkum21"
 
-ROOT = Path(".")
-HISTORY_DIR = ROOT / "history"
-HISTORY_DIR.mkdir(exist_ok=True)
-HISTORY_PATH = HISTORY_DIR / "audit_history.csv"
+VAULT_DIR = "vault"           # where runs (xlsx + annotated pdf) are persisted
+EXPORT_DIR = "exports"        # daily exported CSV snapshots
+HISTORY_CSV = os.path.join(VAULT_DIR, "history.csv")
 
-OUTPUT_DIR = ROOT / "outputs"
-OUTPUT_DIR.mkdir(exist_ok=True)
+DEFAULT_UI_VISIBILITY_HOURS = 24  # how long runs stay visible in the UI list
+DATA_RETENTION_DAYS = 14          # hard retention in storage
+AUTO_EXPORT_ONCE_PER_DAY = True   # pseudo-cron: export at first run after midnight
 
-BACKUP_DIR = ROOT / "backups"
-BACKUP_DIR.mkdir(exist_ok=True)
+# ========== UTIL FS ==========
+os.makedirs(VAULT_DIR, exist_ok=True)
+os.makedirs(EXPORT_DIR, exist_ok=True)
 
-RULES_PATH = ROOT / "rules_example.yaml"
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
-DEFAULT_RETENTION_DAYS = 14
-MAX_OUTPUT_DIR_BYTES = 2 * 1024**3  # 2 GB
-DEFAULT_UI_VISIBILITY_HOURS = 24
-BACKUP_RETENTION_DAYS = 60
+def ts_iso(dt: datetime | None = None) -> str:
+    return (dt or utc_now()).isoformat()
 
-APP_PASSWORD = "vanB3lkum21"
+def safe_filename(s: str) -> str:
+    s = re.sub(r"[^\w\-.]+", "_", s.strip())
+    return s[:180] or "unnamed"
 
-# -----------------------------
-# Small utilities
-# -----------------------------
-def now_uk():
-    return datetime.now(tz=LONDON_TZ)
+# ========== AUTH ==========
+def password_gate():
+    if "auth_ok" not in st.session_state:
+        st.session_state.auth_ok = False
+    if st.session_state.auth_ok:
+        return True
 
-def utc_iso():
-    return datetime.utcnow().isoformat()
+    st.title(APP_TITLE)
+    st.caption("🔒 Secure access required")
+    pwd = st.text_input("Enter password", type="password")
+    if st.button("Unlock"):
+        if pwd == PASSWORD:
+            st.session_state.auth_ok = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
 
-def sanitize_filename(name: str) -> str:
-    name = re.sub(r"[^\w\-.]+", "_", (name or "").strip())
-    return name[:180] if name else "file"
+# ========== LOGO ==========
+def top_right_logo(logo_path: str):
+    if not logo_path or not os.path.exists(logo_path):
+        return
+    try:
+        with open(logo_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        st.markdown(
+            f"""
+            <style>
+            .top-right-logo {{
+                position: fixed;
+                top: 12px;
+                right: 16px;
+                width: 140px;
+                height: auto;
+                z-index: 9999;
+                opacity: 0.95;
+            }}
+            @media (max-width: 768px) {{
+              .top-right-logo {{ width: 100px; }}
+            }}
+            </style>
+            <img src="data:image/png;base64,{b64}" class="top-right-logo">
+            """,
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
 
-def ensure_history_columns(df: pd.DataFrame) -> pd.DataFrame:
-    expected = [
-        "timestamp_utc","file","client","project","site_type","vendor",
-        "cabinet_loc","radio_loc","sectors","mimo_config","site_address",
-        "supplier","drawing_type","used_ocr","pages",
-        "minor_findings","major_findings","total_findings",
-        "outcome","rft_percent","exclude",
-        "excel_path","annotated_pdf_path"
-    ]
-    for c in expected:
-        if c not in df.columns:
-            df[c] = "" if c not in ("pages","minor_findings","major_findings","total_findings","rft_percent","exclude") else (0 if c!="exclude" else False)
+# ========== RULES LOADER ==========
+def load_rules(path: str) -> Dict[str, Any]:
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, "rb") as f:
+        data = f.read()
+    # Normalize Windows line endings and escape stray backslashes if needed
+    txt = data.decode(errors="ignore").replace("\r\n", "\n")
+    try:
+        obj = yaml.safe_load(txt) or {}
+    except yaml.YAMLError:
+        # attempt to sanitize unknown escapes in quoted strings
+        txt2 = re.sub(r'\\(?![nrt"\\])', r'\\\\', txt)
+        obj = yaml.safe_load(txt2) or {}
+    if not isinstance(obj, dict):
+        obj = {}
+    # Ensure expected containers
+    obj.setdefault("allowlist", [])
+    obj.setdefault("rules", [])
+    obj.setdefault("relationships", [])
+    obj.setdefault("checklist", [])
+    return obj
+
+# ========== PDF TEXT & BBOX ==========
+def extract_pages(pdf_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Returns list of pages with text and word-level bbox.
+    [{page_num:int, text:str, words:[(w, x0,y0,x1,y1)]}]
+    """
+    pages = []
+    if not fitz:
+        # Minimal fallback
+        return [{"page_num": 1, "text": "", "words": []}]
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for i, page in enumerate(doc):
+        words = page.get_text("words")  # list of tuples: (x0,y0,x1,y1, word, block_no, line_no, word_no)
+        words_norm = []
+        txt_parts = []
+        for w in words:
+            x0, y0, x1, y1, word, *_ = w
+            words_norm.append((word, float(x0), float(y0), float(x1), float(y1)))
+            txt_parts.append(word)
+        pages.append({
+            "page_num": i+1,
+            "text": " ".join(txt_parts),
+            "words": words_norm
+        })
+    doc.close()
+    return pages
+
+# ========== SPELLING (robust, allowlist-aware) ==========
+def build_vocab(pages: List[Dict[str, Any]], allow: set[str]) -> List[str]:
+    # naive vocab from doc + allowlist to help suggestions
+    words = []
+    for p in pages:
+        for w in re.findall(r"[A-Za-z][A-Za-z\-']{1,}", p.get("text","")):
+            words.append(w.lower())
+    base = list(set(words) | allow)
+    return base or list(allow)
+
+def spelling_findings(pages: List[Dict[str, Any]], allowlist: List[str]) -> List[Dict[str, Any]]:
+    allow = set([w.strip().lower() for w in allowlist if w])
+    vocab = build_vocab(pages, allow)
+    findings = []
+    for p in pages:
+        page_num = p["page_num"]
+        for (w, x0,y0,x1,y1) in p.get("words", []):
+            wl = w.lower()
+            if not re.match(r"^[A-Za-z][A-Za-z\-']*$", w):
+                continue
+            if wl in allow:
+                continue
+            # Very simple heuristic: suspicious if mixedcase weirdly or uncommon short edits
+            if len(w) <= 2:
+                continue
+            # Suggest from vocab (which includes allowlist) to avoid crashy .candidates
+            suggestion = None
+            try:
+                best = process.extractOne(wl, vocab, scorer=fuzz.WRatio, score_cutoff=87)
+                if best:
+                    suggestion = best[0]
+            except Exception:
+                suggestion = None
+            findings.append({
+                "category": "Spelling",
+                "severity": "Minor",
+                "message": f"Possible misspelling: '{w}'",
+                "suggestion": suggestion,
+                "page": page_num,
+                "bbox": [x0,y0,x1,y1],
+                "rule_id": "spelling_generic"
+            })
+    return findings
+
+# ========== RULE ENGINE ==========
+def normalize_site_address(addr: str) -> str:
+    if not addr:
+        return ""
+    # drop literal ", 0 ," tokens & extra spaces
+    parts = [p.strip() for p in addr.split(",")]
+    parts = [p for p in parts if p != "0"]
+    return ", ".join([p for p in parts if p])
+
+def title_matches_address(pdf_title: str, site_addr: str) -> bool:
+    # loose compare: all address tokens must be found in title (order-agnostic)
+    A = normalize_site_address(site_addr).upper()
+    if not A:
+        return True  # nothing to enforce
+    tokens = [t for t in re.split(r"[\s,]+", A) if t and t not in {"ROAD","STREET","AVENUE","LANE"}]
+    T = re.sub(r"\s+", " ", pdf_title.upper())
+    return all(tok in T for tok in tokens)
+
+def project_hides_mimo(project: str) -> bool:
+    return (project or "").strip().lower() in {"power resilience", "power res", "power resillience"}
+
+def run_rules(
+    pages: List[Dict[str, Any]],
+    rules_blob: Dict[str, Any],
+    metadata: Dict[str, Any],
+    pdf_title: str
+) -> List[Dict[str, Any]]:
+    findings = []
+
+    # 1) Site address vs title
+    site_addr = metadata.get("site_address","")
+    if site_addr and pdf_title:
+        if not title_matches_address(pdf_title, site_addr):
+            findings.append({
+                "category": "Metadata",
+                "severity": "Major",
+                "message": "Site Address does not match the PDF title.",
+                "suggestion": f"Ensure title contains: {normalize_site_address(site_addr)}",
+                "page": 1,
+                "bbox": None,
+                "rule_id": "meta_address_vs_title"
+            })
+
+    # 2) Forbidden relationships (e.g., Brush vs Generator Power) from rules YAML
+    for rel in rules_blob.get("relationships", []):
+        # each rel: {"if_contains":"Brush", "forbid":"Generator Power", "severity":"Major"}
+        ic = (rel.get("if_contains") or "").strip()
+        fb = (rel.get("forbid") or "").strip()
+        if not ic or not fb:
+            continue
+        text_all = " ".join([p.get("text","") for p in pages]).upper()
+        if ic.upper() in text_all and fb.upper() in text_all:
+            findings.append({
+                "category": "Relationship",
+                "severity": rel.get("severity","Major"),
+                "message": f"'{fb}' is not allowed when '{ic}' is present.",
+                "suggestion": "Remove the forbidden pairing or adjust design.",
+                "page": 1,
+                "bbox": None,
+                "rule_id": f"rel_{ic}_{fb}"
+            })
+
+    # 3) Regex/content rules from YAML
+    for rule in rules_blob.get("rules", []):
+        pattern = rule.get("pattern")
+        if not pattern:
+            continue
+        sev = rule.get("severity","Minor")
+        msg = rule.get("message","Rule match")
+        rx = re.compile(pattern, re.IGNORECASE)
+        for p in pages:
+            text = p.get("text","")
+            if rx.search(text):
+                # try to get bbox for the first matching word (best effort)
+                bbox = None
+                try:
+                    word = rx.search(text).group(0)
+                    for (w,x0,y0,x1,y1) in p.get("words", []):
+                        if w.lower() == word.lower():
+                            bbox = [x0,y0,x1,y1]; break
+                except Exception:
+                    pass
+                findings.append({
+                    "category": rule.get("category","Rule"),
+                    "severity": sev,
+                    "message": msg,
+                    "suggestion": rule.get("suggestion"),
+                    "page": p["page_num"],
+                    "bbox": bbox,
+                    "rule_id": rule.get("id", f"rule_{pattern}")
+                })
+
+    return findings
+
+# ========== ANNOTATION ==========
+def annotate_pdf(pdf_bytes: bytes, findings: List[Dict[str, Any]]) -> bytes:
+    if not fitz:
+        return pdf_bytes
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for f in findings:
+        page_idx = max(0, int(f.get("page",1)) - 1)
+        if page_idx >= len(doc):
+            continue
+        page = doc[page_idx]
+        note = f"{f.get('category','')}: {f.get('message','')}"
+        bbox = f.get("bbox")
+        if bbox and len(bbox)==4:
+            rect = fitz.Rect(*bbox)
+            try:
+                annot = page.add_rect_annot(rect)
+                annot.set_colors(stroke=(1,0,0))
+                annot.set_border(width=0.8, dashes=[2,2])
+                annot.update()
+                page.add_text_annot(rect.br, note)
+            except Exception:
+                # fallback to a sticky note
+                page.add_text_annot(rect.tl, note)
+        else:
+            # place a sticky note at top-left margin
+            page.add_text_annot(fitz.Point(36, 36), note)
+    out = io.BytesIO()
+    doc.save(out)
+    doc.close()
+    return out.getvalue()
+
+# ========== REPORT ==========
+def build_report_df(findings: List[Dict[str, Any]], metadata: Dict[str, Any], file_name: str) -> pd.DataFrame:
+    rows = []
+    for f in findings:
+        rows.append({
+            "file_name": file_name,
+            "category": f.get("category"),
+            "severity": f.get("severity"),
+            "message": f.get("message"),
+            "suggestion": f.get("suggestion"),
+            "page": f.get("page"),
+            "bbox": json.dumps(f.get("bbox")),
+            "rule_id": f.get("rule_id"),
+            # metadata echoes
+            **{f"meta_{k}": v for k,v in metadata.items()}
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        # still output a “pass” sheet downstream
+        df = pd.DataFrame(columns=[
+            "file_name","category","severity","message","suggestion","page","bbox","rule_id"
+        ] + [f"meta_{k}" for k in metadata.keys()])
     return df
 
-def ensure_history_csv():
-    if not HISTORY_PATH.exists():
-        df = pd.DataFrame(columns=[
-            "timestamp_utc","file","client","project","site_type","vendor",
-            "cabinet_loc","radio_loc","sectors","mimo_config","site_address",
-            "supplier","drawing_type","used_ocr","pages",
-            "minor_findings","major_findings","total_findings",
-            "outcome","rft_percent","exclude",
-            "excel_path","annotated_pdf_path"
-        ])
-        df.to_csv(HISTORY_PATH, index=False)
+def save_report_and_annotation(df: pd.DataFrame, annotated_pdf: bytes | None, file_name: str, passed: bool) -> Tuple[str, Optional[str]]:
+    stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
+    base = os.path.splitext(safe_filename(file_name))[0]
+    verdict = "PASS" if passed else "REJECTED"
+    xlsx_path = os.path.join(VAULT_DIR, f"{base}__{verdict}__{stamp}.xlsx")
+    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="Findings")
+    pdf_path = None
+    if annotated_pdf:
+        pdf_path = os.path.join(VAULT_DIR, f"{base}__{verdict}__{stamp}.annotated.pdf")
+        with open(pdf_path, "wb") as f:
+            f.write(annotated_pdf)
+    return xlsx_path, pdf_path
 
-def save_bytes_to_outputs(filename: str, blob: bytes) -> str:
-    filename = sanitize_filename(filename)
-    path = OUTPUT_DIR / filename
-    with open(path, "wb") as f:
-        f.write(blob)
-    return str(path)
-
-def file_age_days(path: Path) -> float:
+# ========== HISTORY ==========
+def load_history() -> pd.DataFrame:
+    if not os.path.exists(HISTORY_CSV):
+        return pd.DataFrame()
     try:
-        mtime = path.stat().st_mtime
-        return (datetime.utcnow() - datetime.utcfromtimestamp(mtime)).days
+        df = pd.read_csv(HISTORY_CSV)
     except Exception:
-        return 0.0
+        return pd.DataFrame()
+    # timestamp_utc as tz-aware
+    if "timestamp_utc" in df.columns:
+        df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], errors="coerce", utc=True)
+    return df
 
-def outputs_size_bytes() -> int:
-    total = 0
-    for p in OUTPUT_DIR.glob("*"):
-        try:
-            if p.is_file(): total += p.stat().st_size
-        except: pass
-    return total
-
-def size_human(nbytes: int) -> str:
-    val = float(nbytes)
-    for unit in ["B","KB","MB","GB","TB"]:
-        if val < 1024.0:
-            return f"{val:,.1f} {unit}"
-        val /= 1024.0
-    return f"{val:,.1f} PB"
-
-def clean_outputs(retention_days: int = DEFAULT_RETENTION_DAYS,
-                  max_bytes: int = MAX_OUTPUT_DIR_BYTES) -> dict:
-    deleted_by_age, deleted_by_size = [], []
-    for p in OUTPUT_DIR.glob("*"):
-        if p.is_file() and file_age_days(p) > retention_days:
-            try: p.unlink(); deleted_by_age.append(p.name)
-            except: pass
-    # size cap
-    files = [p for p in OUTPUT_DIR.glob("*") if p.is_file()]
-    files_sorted = sorted(files, key=lambda p: p.stat().st_mtime)
-    total = outputs_size_bytes()
-    i = 0
-    while total > max_bytes and i < len(files_sorted):
-        p = files_sorted[i]
-        try:
-            sz = p.stat().st_size
-            p.unlink()
-            deleted_by_size.append(p.name)
-            total -= sz
-        except: pass
-        i += 1
-    return {"deleted_by_age": deleted_by_age, "deleted_by_size": deleted_by_size}
-
-def zipdir(ziph: zipfile.ZipFile, base_dir: Path, prefix: str):
-    for p in base_dir.rglob("*"):
-        if p.is_file():
-            arcname = f"{prefix}/{p.relative_to(base_dir)}"
-            try: ziph.write(p, arcname)
-            except: pass
-
-def export_daily_backup() -> str:
-    ensure_history_csv()
-    ts = now_uk().strftime("%Y%m%d")
-    zip_path = BACKUP_DIR / f"backup_{ts}.zip"
-    if zip_path.exists():
-        return str(zip_path)
-    meta = {"generated_at_uk": now_uk().isoformat(), "note": "Daily export of history & outputs"}
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        if HISTORY_PATH.exists():
-            z.write(HISTORY_PATH, arcname="history/audit_history.csv")
-        zipdir(z, OUTPUT_DIR, "outputs")
-        z.writestr("meta.json", json.dumps(meta, indent=2))
-    return str(zip_path)
-
-def clean_old_backups(retention_days: int = BACKUP_RETENTION_DAYS) -> dict:
-    cutoff = now_uk() - timedelta(days=retention_days)
-    deleted = []
-    for p in BACKUP_DIR.glob("backup_*.zip"):
-        try:
-            m = re.search(r"backup_(\d{8})\.zip$", p.name)
-            dt = datetime.strptime(m.group(1), "%Y%m%d").replace(tzinfo=LONDON_TZ) if m else datetime.fromtimestamp(p.stat().st_mtime, tz=LONDON_TZ)
-            if dt < cutoff:
-                p.unlink(); deleted.append(p.name)
-        except: pass
-    return {"deleted": deleted}
+def push_history(record: Dict[str, Any]):
+    df = load_history()
+    record = record.copy()
+    record["timestamp_utc"] = pd.to_datetime(record.get("timestamp_utc") or ts_iso(), utc=True)
+    df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
+    df.to_csv(HISTORY_CSV, index=False)
 
 def filter_history_for_ui(df: pd.DataFrame, hours: int | None) -> pd.DataFrame:
     if df.empty or not hours:
         return df
-    if "timestamp_utc" not in df.columns: return df
-    if not np.issubdtype(df["timestamp_utc"].dtype, np.datetime64):
-        df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], errors="coerce", utc=True)
-    cutoff_utc = datetime.utcnow() - timedelta(hours=hours)
+    if "timestamp_utc" not in df.columns:
+        return df
+    df = df.copy()
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], errors="coerce", utc=True)
+    df = df.dropna(subset=["timestamp_utc"])
+    cutoff_utc = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=hours)
     return df[df["timestamp_utc"] >= cutoff_utc]
 
-# -----------------------------
-# Rules I/O
-# -----------------------------
-def load_rules() -> dict:
-    if not RULES_PATH.exists():
-        # Create a minimal default
-        base = {
-            "allowlist": ["MBNL","Vodafone","Ericsson","Nokia","BTEE","Cellnex","H3G","Cornerstone"],
-            "checks": {
-                "spelling": {"enabled": True, "severity": "minor"},
-                "address_title_match": {"enabled": True, "severity": "major"}
-            }
-        }
-        RULES_PATH.write_text(yaml.safe_dump(base, sort_keys=False))
-        return base
-    try:
-        with open(RULES_PATH, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        return data
-    except Exception as e:
-        st.error(f"YAML load error: {e}")
-        return {}
-
-def save_rules(yaml_text: str) -> tuple[bool,str]:
-    try:
-        data = yaml.safe_load(yaml_text)
-        if not isinstance(data, dict):
-            return False, "Top-level YAML must be a mapping (dict)."
-        RULES_PATH.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
-        return True, "Rules saved."
-    except Exception as e:
-        return False, f"Parse error: {e}"
-
-# -----------------------------
-# PDF utilities
-# -----------------------------
-def extract_pdf_text_pages(pdf_bytes: bytes) -> list[str]:
-    pages = []
-    try:
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            for p in doc:
-                pages.append(p.get_text("text"))
-    except Exception:
-        pass
-    return pages or [""]
-
-def annotate_pdf(pdf_bytes: bytes, marks: list[dict]) -> bytes:
-    """
-    marks: [{page:int, bbox:(x0,y0,x1,y1)|None, note:str}]
-    If no bbox, drop a sticky note at top-left margin.
-    """
-    bio = io.BytesIO()
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-        for m in marks:
-            page_idx = int(m.get("page",0))
-            note = str(m.get("note","Finding"))
-            bbox = m.get("bbox", None)
-            if page_idx < 0 or page_idx >= len(doc):
-                page_idx = 0
-            page = doc[page_idx]
+def enforce_retention():
+    # purge files older than DATA_RETENTION_DAYS
+    cutoff = utc_now() - timedelta(days=DATA_RETENTION_DAYS)
+    # history thinning
+    df = load_history()
+    if not df.empty:
+        df_keep = df[pd.to_datetime(df["timestamp_utc"], errors="coerce", utc=True) >= cutoff]
+        df_keep.to_csv(HISTORY_CSV, index=False)
+    # vault files
+    for root in (VAULT_DIR, EXPORT_DIR):
+        for f in os.listdir(root):
+            p = os.path.join(root, f)
             try:
-                if bbox and isinstance(bbox,(list,tuple)) and len(bbox)==4:
-                    rect = fitz.Rect(*[float(v) for v in bbox])
-                    try:
-                        page.add_highlight_annot(rect)
-                    except Exception:
-                        pass
-                    # Add a text annotation near bbox
-                    pin = fitz.Point(rect.x0, max(10, rect.y0-8))
-                    try:
-                        page.add_text_annot(pin, note)
-                    except Exception:
-                        pass
-                else:
-                    # fallback top-left margin
-                    pin = fitz.Point(36, 36)
-                    try:
-                        page.add_text_annot(pin, note)
-                    except Exception:
-                        pass
+                mtime = datetime.fromtimestamp(os.path.getmtime(p), tz=timezone.utc)
+                if mtime < cutoff:
+                    os.remove(p)
             except Exception:
-                # never crash annotation
                 pass
-        doc.save(bio, deflate=True, garbage=4)
-    return bio.getvalue()
 
-# -----------------------------
-# Auditing
-# -----------------------------
-def normalize_tokens(text: str) -> list[str]:
-    # keep letter/digit words; strip punctuation
-    return re.findall(r"[A-Za-z][A-Za-z0-9\-']{2,}", text)
+def maybe_daily_export():
+    if not AUTO_EXPORT_ONCE_PER_DAY:
+        return
+    flag_path = os.path.join(EXPORT_DIR, "last_export_date.txt")
+    today = utc_now().date().isoformat()
+    last = None
+    if os.path.exists(flag_path):
+        with open(flag_path,"r") as f:
+            last = f.read().strip()
+    if last == today:
+        return
+    # perform export
+    df = load_history()
+    if not df.empty:
+        out = os.path.join(EXPORT_DIR, f"audit_history_{today}.csv")
+        df.to_csv(out, index=False)
+    with open(flag_path, "w") as f:
+        f.write(today)
 
-def remove_address_zero_tokens(s: str) -> str:
-    # remove lone ", 0 ," token pattern (with surrounding commas/space)
-    s2 = re.sub(r"\s*,\s*0\s*,\s*", ", ", s)
-    return re.sub(r"\s{2,}", " ", s2).strip()
+# ==========\ STREAMLIT UI ==========
+password_gate()
 
-def spelling_checks(pages: list[str], allowlist: set[str], severity="minor") -> list[dict]:
-    """
-    Conservative spelling checker:
-    - Flags tokens with letters that aren't entirely uppercase acronyms
-    - Skips allowlist items (case-insensitive)
-    - No external dictionary to avoid brittleness; uses simple heuristics
-    """
-    findings = []
-    for i, page in enumerate(pages):
-        tokens = normalize_tokens(page)
-        for t in tokens:
-            low = t.lower()
-            if low in allowlist:  # allowlisted (already lowered)
-                continue
-            if t.isupper() and len(t) <= 5:
-                # short acronym – ignore
-                continue
-            # heuristic: suspicious if contains 3+ consecutive consonants and not hyphenated brandy term
-            if re.search(r"[bcdfghjklmnpqrstvwxz]{4,}", low):
-                findings.append({
-                    "page": i,
-                    "category": "Spelling",
-                    "rule": "Heuristic misspelling",
-                    "severity": severity,
-                    "message": f"Possible misspelling: '{t}'",
-                    "bbox": None
-                })
-    return findings
+st.set_page_config(page_title=APP_TITLE, layout="wide")
+top_right_logo("88F3AB03-9D27-435B-AE39-7427F9A17FFC.png.png")
 
-def title_address_check(title_text: str, site_address: str, severity="major") -> list[dict]:
-    """
-    Ensure address (minus ', 0 ,') appears in title or first page text.
-    """
-    if not site_address:
-        return []
-    addr_norm = remove_address_zero_tokens(site_address).upper()
-    addr_norm = re.sub(r"\s+", " ", addr_norm)
-    title_norm = re.sub(r"\s+", " ", (title_text or "")).upper()
-    # fuzzy contains – require good ratio for a significant chunk
-    ratio = fuzz.partial_ratio(addr_norm, title_norm)
-    if ratio >= 90:
-        return []
-    return [{
-        "page": 0,
-        "category": "Metadata",
-        "rule": "Address must match title",
-        "severity": severity,
-        "message": f"Site address not found in title (ratio {ratio}). Expected fragment: {addr_norm[:50]}...",
-        "bbox": None
-    }]
+enforce_retention()
+maybe_daily_export()
 
-def audit_pdf(pdf_bytes: bytes, meta: dict, rules: dict) -> list[dict]:
-    pages = extract_pdf_text_pages(pdf_bytes)
-    first_page_text = pages[0] if pages else ""
-    findings: list[dict] = []
-
-    checks = (rules.get("checks") or {})
-    allow = set([w.lower() for w in (rules.get("allowlist") or [])])
-
-    # Spelling
-    sc = checks.get("spelling", {})
-    if sc.get("enabled", True):
-        findings += spelling_checks(pages, allow, severity=sc.get("severity","minor"))
-
-    # Address/Title match
-    ac = checks.get("address_title_match", {})
-    if ac.get("enabled", True):
-        findings += title_address_check(first_page_text, meta.get("site_address",""), severity=ac.get("severity","major"))
-
-    # Example rule: disallow pair "Brush" with "Generator Power" (user asked earlier)
-    xr = checks.get("incompatible_terms", {"enabled": False})
-    if xr.get("enabled", False):
-        bad_pairs = xr.get("pairs", [["BRUSH","GENERATOR POWER"]])
-        corpus = (" ".join(pages)).upper()
-        for a,b in bad_pairs:
-            if a.upper() in corpus and b.upper() in corpus:
-                findings.append({
-                    "page": 0,
-                    "category": "Content",
-                    "rule": "Incompatible terms",
-                    "severity": xr.get("severity","major"),
-                    "message": f"Incompatible terms found together: {a} and {b}",
-                    "bbox": None
-                })
-
-    # Mandatory metadata
-    required = ["client","project","site_type","vendor","cabinet_loc","radio_loc","sectors","supplier","drawing_type","site_address"]
-    missing = [k for k in required if not str(meta.get(k,"")).strip()]
-    if missing:
-        findings.append({
-            "page": 0,
-            "category": "Metadata",
-            "rule": "Missing required metadata",
-            "severity": "major",
-            "message": f"Missing: {', '.join(missing)}",
-            "bbox": None
-        })
-
-    return findings
-
-# -----------------------------
-# Reporting (Excel + PDF)
-# -----------------------------
-def build_excel_and_pdf(file_name: str, pdf_bytes: bytes, findings: list[dict], meta: dict) -> tuple[bytes, bytes, str, str, str]:
-    rows = []
-    majors = 0; minors = 0
-    for f in findings:
-        if (f.get("severity") or "").lower() == "major": majors += 1
-        else: minors += 1
-        rows.append({
-            "file": file_name,
-            "category": f.get("category",""),
-            "rule": f.get("rule",""),
-            "severity": f.get("severity",""),
-            "message": f.get("message",""),
-            "page": f.get("page",0)
-        })
-    df = pd.DataFrame(rows) if rows else pd.DataFrame([{
-        "file": file_name, "category":"", "rule":"", "severity":"", "message":"No findings", "page":""
-    }])
-    outcome = "PASS" if len(findings)==0 else "REJECTED"
-    rft = 100.0 if len(findings)==0 else 0.0
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = Path(file_name).stem
-
-    xlsx_name = f"{base}_{outcome}_{stamp}.xlsx"
-    pdf_name  = f"{base}_ANNOTATED_{outcome}_{stamp}.pdf"
-
-    # Excel bytes
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-        meta_df = pd.DataFrame([meta])
-        meta_df.to_excel(xw, index=False, sheet_name="Audit Meta")
-        df.to_excel(xw, index=False, sheet_name="Findings")
-        summary = pd.DataFrame([{
-            "Outcome": outcome,
-            "Minor Findings": minors,
-            "Major Findings": majors,
-            "Total Findings": len(findings),
-            "RFT %": rft
-        }])
-        summary.to_excel(xw, index=False, sheet_name="Summary")
-    excel_bytes = buf.getvalue()
-
-    # Annotation
-    marks = [{"page": f.get("page",0), "bbox": f.get("bbox"), "note": f.get("message","Finding")} for f in findings]
-    annotated_pdf = annotate_pdf(pdf_bytes, marks)
-
-    # Persist (respect retention elsewhere)
-    excel_path = save_bytes_to_outputs(xlsx_name, excel_bytes)
-    pdf_path   = save_bytes_to_outputs(pdf_name, annotated_pdf)
-
-    return excel_bytes, annotated_pdf, outcome, excel_path, pdf_path
-
-def push_history(file_name: str, findings: list[dict], outcome: str, pages: int, meta: dict, excel_path: str, pdf_path: str):
-    ensure_history_csv()
-    try:
-        dfh = pd.read_csv(HISTORY_PATH, parse_dates=["timestamp_utc"])
-    except Exception:
-        dfh = pd.DataFrame()
-    dfh = ensure_history_columns(dfh)
-
-    minor = sum(1 for f in findings if (f.get("severity") or "").lower()=="minor")
-    major = sum(1 for f in findings if (f.get("severity") or "").lower()=="major")
-    new_row = {
-        "timestamp_utc": utc_iso(),
-        "file": file_name,
-        "client": meta.get("client",""),
-        "project": meta.get("project",""),
-        "site_type": meta.get("site_type",""),
-        "vendor": meta.get("vendor",""),
-        "cabinet_loc": meta.get("cabinet_loc",""),
-        "radio_loc": meta.get("radio_loc",""),
-        "sectors": meta.get("sectors",""),
-        "mimo_config": meta.get("mimo_config",""),
-        "site_address": meta.get("site_address",""),
-        "supplier": meta.get("supplier",""),
-        "drawing_type": meta.get("drawing_type",""),
-        "used_ocr": "False",
-        "pages": pages,
-        "minor_findings": minor,
-        "major_findings": major,
-        "total_findings": minor+major,
-        "outcome": outcome,
-        "rft_percent": 100.0 if (minor+major)==0 else 0.0,
-        "exclude": False,
-        "excel_path": excel_path,
-        "annotated_pdf_path": pdf_path
-    }
-    dfh = pd.concat([dfh, pd.DataFrame([new_row])], ignore_index=True)
-    dfh.to_csv(HISTORY_PATH, index=False)
-
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-st.set_page_config(page_title="AI Design Quality Auditor", layout="wide")
-
-# Sticky logo (top-right)
-def draw_logo():
-    logo_file = st.session_state.get("logo_path","")
-    st.markdown("""
-        <style>
-        .top-right-logo{
-            position:fixed; top:16px; right:20px; z-index:1000;
-            width: 140px; height:auto; opacity:0.95;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-    if logo_file and Path(logo_file).exists():
-        import base64
-        b64 = base64.b64encode(open(logo_file, "rb").read()).decode()
-        st.markdown(f'<img src="data:image/png;base64,{b64}" class="top-right-logo">', unsafe_allow_html=True)
-
-if "logo_path" not in st.session_state:
-    st.session_state["logo_path"] = ""
-
-# Daily backup (lazy cron) & visibility setup
-if "last_daily_backup_date" not in st.session_state:
-    st.session_state["last_daily_backup_date"] = ""
-today_uk = now_uk().strftime("%Y-%m-%d")
-if st.session_state["last_daily_backup_date"] != today_uk:
-    try:
-        export_daily_backup()
-        clean_old_backups(BACKUP_RETENTION_DAYS)
-    except Exception as e:
-        st.warning(f"Daily backup failed: {e}")
-    st.session_state["last_daily_backup_date"] = today_uk
-
-if "ui_visibility_hours" not in st.session_state:
-    st.session_state["ui_visibility_hours"] = DEFAULT_UI_VISIBILITY_HOURS
-
-# Retention cleaning (tighten to 1 day if visibility = 24h)
-visibility_hours = st.session_state["ui_visibility_hours"]
-outputs_retention_days = 1 if visibility_hours == 24 else DEFAULT_RETENTION_DAYS
-clean_outputs(outputs_retention_days)
-
-# Sidebar – branding & quick settings
 with st.sidebar:
-    st.header("Branding / Quick Settings")
-    st.text_input("Logo file path (in repo root)", key="logo_path", placeholder="e.g. 88F3...png")
-    st.caption("Logo stays fixed in the top-right if the file exists.")
-    draw_logo()
+    st.header("Settings")
+    rules_file = st.file_uploader("Rules YAML (rules_example.yaml)", type=["yaml", "yml"])
+    allow_edit = st.checkbox("Show raw rules JSON preview", value=False)
+    ui_hours = st.number_input("UI Visibility Window (hours)", 1, 336, value=DEFAULT_UI_VISIBILITY_HOURS)
+    st.session_state["ui_visibility_hours"] = int(ui_hours)
 
-    st.divider()
-    st.caption(f"Outputs usage: {size_human(outputs_size_bytes())}")
-    st.write(f"Visible window: **{visibility_hours}h**")
-    st.caption("Daily backup runs at first open after midnight (UK).")
+st.title(APP_TITLE)
+st.caption("Professional, fast, and auditable design checks — with learning feedback loops.")
 
-# Tabs
-tab_audit, tab_history, tab_settings = st.tabs(["🔎 Audit", "📈 History & Analytics", "⚙️ Settings"])
+# ---------- Metadata (all mandatory unless noted) ----------
+colA, colB, colC, colD = st.columns(4)
 
-# -----------------------------
-# AUDIT TAB
-# -----------------------------
-with tab_audit:
-    st.subheader("Run an Audit")
+with colA:
+    supplier = st.selectbox("Supplier (mandatory)", ["— Select —","Cellnex","Cornerstone","Vodafone","MBNL","BTEE","H3G","Other"])
+with colB:
+    drawing_type = st.selectbox("Drawing Type (mandatory)", ["— Select —","General Arrangement","Detailed Design"])
+with colC:
+    client = st.selectbox("Client (mandatory)", ["— Select —","BTEE","Vodafone","MBNL","H3G","Cornerstone","Cellnex"])
+with colD:
+    project = st.selectbox("Project (mandatory)", ["— Select —","RAN","Power Resilience","East Unwind","Beacon 4"])
 
-    # Metadata form
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        client = st.selectbox("Client*", ["","BTEE","Vodafone","MBNL","H3G","Cornerstone","Cellnex"])
-    with c2:
-        project = st.selectbox("Project*", ["","RAN","Power Resilience","East Unwind","Beacon 4"])
-    with c3:
-        site_type = st.selectbox("Site Type*", ["","Greenfield","Rooftop","Streetworks"])
-    with c4:
-        supplier = st.selectbox("Supplier*", ["","Balfour Beatty","Circet","Morrison Data Services","N/A"])
+colE, colF, colG, colH = st.columns(4)
+with colE:
+    site_type = st.selectbox("Site Type (mandatory)", ["— Select —","Greenfield","Rooftop","Streetworks"])
+with colF:
+    vendor = st.selectbox("Proposed Vendor (mandatory)", ["— Select —","Ericsson","Nokia"])
+with colG:
+    cabinet_loc = st.selectbox("Proposed Cabinet Location (mandatory)", ["— Select —","Indoor","Outdoor"])
+with colH:
+    radio_loc = st.selectbox("Proposed Radio Location (mandatory)", ["— Select —","High Level","Low Level","Indoor","Door"])
 
-    c5, c6, c7, c8 = st.columns(4)
-    with c5:
-        vendor = st.selectbox("Proposed Vendor*", ["","Ericsson","Nokia"])
-    with c6:
-        cabinet_loc = st.selectbox("Proposed Cabinet Location*", ["","Indoor","Outdoor"])
-    with c7:
-        radio_loc = st.selectbox("Proposed Radio Location*", ["","High Level","Low Level","Indoor","Door"])
-    with c8:
-        drawing_type = st.selectbox("Drawing Type*", ["","General Arrangement","Detailed Design"])
+colI, colJ = st.columns(2)
+with colI:
+    sectors = st.selectbox("Quantity of Sectors (mandatory)", ["— Select —","1","2","3","4","5","6"])
+with colJ:
+    site_address = st.text_input("Site Address (mandatory)", placeholder="e.g., MANBY ROAD , 0 , IMMINGHAM , IMMINGHAM , DN40 2LQ")
 
-    c9, c10, c11 = st.columns([1,2,3])
-    with c9:
-        sectors = st.selectbox("Quantity of Sectors*", ["","1","2","3","4","5","6"])
-    with c10:
-        # Hide MIMO field when Power Resilience
-        show_mimo = (project != "Power Resilience")
-        mimo_config = st.selectbox("Proposed MIMO Config (hidden for Power Resilience)" if show_mimo else "Proposed MIMO Config (not required for Power Resilience)",
-                                   [""] + [
-                                       "18\\21\\26 @4x4; 70\\80 @2x2",
-                                       "18\\21 @2x2",
-                                       "18\\21\\26 @4x4; 3500 @8x8",
-                                       "18\\21\\26 @4x4",
-                                   ],
-                                   disabled=not show_mimo)
-    with c11:
-        site_address = st.text_input("Site Address*", placeholder="MANBY ROAD , 0 , IMMINGHAM , IMMINGHAM , DN40 2LQ")
+# MIMO block (hidden for Power Resilience)
+show_mimo = not project_hides_mimo(project)
+if show_mimo:
+    st.markdown("#### Proposed MIMO Config (optional unless required by client)")
+    same_mimo = st.checkbox("Use same MIMO config for all sectors", value=True)
+    mimo_options = [
+        "18\\21\\26 @4x4; 70\\80 @2x2",
+        "18\\21 @2x2",
+        "18\\21\\26 @4x4; 3500 @8x8",
+        "18\\21\\26 @4x4",
+    ]
+    colM1, colM2, colM3 = st.columns(3)
+    mimo_s1 = colM1.selectbox("Proposed Mimo S1", mimo_options, index=0)
+    mimo_s2 = colM2.selectbox("Proposed Mimo S2", mimo_options, index=0 if same_mimo else 1, disabled=same_mimo)
+    mimo_s3 = colM3.selectbox("Proposed Mimo S3", mimo_options, index=0 if same_mimo else 2, disabled=same_mimo)
+else:
+    mimo_s1 = mimo_s2 = mimo_s3 = None
 
-    meta = {
-        "client": client, "project": project, "site_type": site_type,
-        "vendor": vendor, "cabinet_loc": cabinet_loc, "radio_loc": radio_loc,
-        "sectors": sectors, "mimo_config": mimo_config if show_mimo else "",
-        "site_address": site_address, "supplier": supplier, "drawing_type": drawing_type
-    }
+# File upload
+st.markdown("---")
+pdf_file = st.file_uploader("Upload a PDF to audit", type=["pdf"])
 
-    st.divider()
+# Controls
+col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([1,1,1,2])
+with col_btn1:
+    audit_clicked = st.button("▶️ Run Audit", use_container_width=True)
+with col_btn2:
+    clear_meta = st.button("🧹 Clear Metadata", use_container_width=True)
+with col_btn3:
+    export_now = st.button("📤 Export History Now", use_container_width=True)
+with col_btn4:
+    exclude_analytics = st.checkbox("Exclude this run from analytics (while training rules)")
 
-    # File upload (single audit at a time)
-    pdf_file = st.file_uploader("Upload a PDF to audit", type=["pdf"])
+if clear_meta:
+    for k in ["supplier","drawing_type","client","project","site_type","vendor","cabinet_loc","radio_loc","sectors","site_address"]:
+        st.session_state.pop(k, None)
+    st.rerun()
 
-    cols = st.columns([1,1,6])
-    with cols[0]:
-        do_audit = st.button("🚀 Audit", type="primary", use_container_width=True)
-    with cols[1]:
-        if st.button("🧹 Clear Metadata", use_container_width=True):
-            for k in ["client","project","site_type","vendor","cabinet_loc","radio_loc","sectors","mimo_config","site_address","supplier","drawing_type"]:
-                st.session_state.pop(k, None)
-            st.experimental_rerun()
-
-    # Show current rules summary
-    with st.expander("Current Rules (read-only summary)"):
-        rules = load_rules()
-        st.json(rules)
-
-    # Run audit
-    if do_audit:
-        # Validate mandatory metadata
-        required = ["client","project","site_type","vendor","cabinet_loc","radio_loc","sectors","supplier","drawing_type","site_address"]
-        missing = [k for k in required if not str(meta.get(k,"")).strip()]
-        if not pdf_file:
-            st.error("Please upload a PDF.")
-        elif missing:
-            st.error("Please complete all required metadata: " + ", ".join(missing))
-        else:
-            pdf_bytes = pdf_file.read()
-            findings = audit_pdf(pdf_bytes, meta, rules)
-            pages = extract_pdf_text_pages(pdf_bytes)
-            excel_bytes, annotated_pdf, outcome, excel_path, pdf_path = build_excel_and_pdf(pdf_file.name, pdf_bytes, findings, meta)
-            push_history(pdf_file.name, findings, outcome, pages=len(pages), meta=meta, excel_path=excel_path, pdf_path=pdf_path)
-
-            st.success(f"Audit complete → **{outcome}**")
-            cdl1, cdl2 = st.columns(2)
-            with cdl1:
-                st.download_button("⬇️ Excel Report", data=excel_bytes,
-                                   file_name=os.path.basename(excel_path),
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            with cdl2:
-                st.download_button("⬇️ Annotated PDF", data=annotated_pdf,
-                                   file_name=os.path.basename(pdf_path),
-                                   mime="application/pdf")
-
-            if findings:
-                st.markdown("### Findings")
-                st.dataframe(pd.DataFrame([{
-                    "Category": f.get("category",""),
-                    "Rule": f.get("rule",""),
-                    "Severity": f.get("severity",""),
-                    "Message": f.get("message",""),
-                    "Page": f.get("page",0)
-                } for f in findings]), use_container_width=True)
-            else:
-                st.info("No findings 🎉")
-
-# -----------------------------
-# HISTORY & ANALYTICS TAB
-# -----------------------------
-with tab_history:
-    st.subheader("History & Analytics")
-
-    try:
-        dfh = pd.read_csv(HISTORY_PATH, parse_dates=["timestamp_utc"])
-    except Exception:
-        dfh = pd.DataFrame()
-
-    dfh = ensure_history_columns(dfh)
-    df_vis = filter_history_for_ui(dfh.copy(), st.session_state.get("ui_visibility_hours", DEFAULT_UI_VISIBILITY_HOURS))
-
-    st.markdown(f"Showing last **{st.session_state['ui_visibility_hours']} hours**")
-    if df_vis.empty:
-        st.info("No runs in the current visibility window.")
+if export_now:
+    dfh = load_history()
+    if not dfh.empty:
+        out = os.path.join(EXPORT_DIR, f"audit_history_{utc_now().date().isoformat()}_manual.csv")
+        dfh.to_csv(out, index=False)
+        st.success(f"History exported: {out}")
     else:
-        # Recent runs
-        st.markdown("### Recent Runs")
-        show_cols = ["timestamp_utc","file","client","project","supplier","drawing_type","outcome","total_findings","exclude"]
-        st.dataframe(df_vis[show_cols].sort_values("timestamp_utc", ascending=False), use_container_width=True)
+        st.info("No history yet to export.")
 
-        # Saved outputs quick downloads
-        st.markdown("### Saved Outputs")
-        for _, row in df_vis.sort_values("timestamp_utc", ascending=False).head(50).iterrows():
-            c = st.columns([3,1,1,2,2,1])
-            with c[0]:
-                st.caption(str(row["timestamp_utc"]))
-                st.write(f'**{row["file"]}** — {row["outcome"]}')
-            with c[1]:
-                xp = row.get("excel_path","")
-                if xp and Path(xp).exists():
-                    st.download_button("Excel", data=open(xp,"rb").read(),
-                                       file_name=os.path.basename(xp),
-                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                       key=f"x_{row.name}")
-                else:
-                    st.button("Excel", disabled=True, key=f"xd_{row.name}")
-            with c[2]:
-                pp = row.get("annotated_pdf_path","")
-                if pp and Path(pp).exists():
-                    st.download_button("PDF", data=open(pp,"rb").read(),
-                                       file_name=os.path.basename(pp),
-                                       mime="application/pdf",
-                                       key=f"p_{row.name}")
-                else:
-                    st.button("PDF", disabled=True, key=f"pd_{row.name}")
-            with c[3]:
-                st.caption("Supplier")
-                st.write(str(row.get("supplier","")))
-            with c[4]:
-                st.caption("Drawing Type")
-                st.write(str(row.get("drawing_type","")))
-            with c[5]:
-                # Exclude toggle
-                excl_key = f"excl_{row.name}"
-                cur = bool(row.get("exclude", False))
-                if st.checkbox("Exclude", value=cur, key=excl_key):
-                    new_val = True
-                else:
-                    new_val = False
-                # Write back on change
-                if new_val != cur:
-                    dfh.loc[row.name, "exclude"] = new_val
-                    dfh.to_csv(HISTORY_PATH, index=False)
-                    st.experimental_rerun()
+# Validate rules
+rules_blob = {}
+if rules_file is not None:
+    # write to temp and load
+    tmp_path = os.path.join(VAULT_DIR, f"rules_{int(time.time())}.yaml")
+    with open(tmp_path, "wb") as f:
+        f.write(rules_file.read())
+    rules_blob = load_rules(tmp_path)
+else:
+    # allow empty but keep structure
+    rules_blob = {"allowlist": [], "rules": [], "relationships": [], "checklist": []}
 
-        # Simple analytics (excluding excluded)
-        st.markdown("### Analytics (excluding excluded)")
-        use = dfh[dfh.get("exclude", False) != True].copy()
-        if not use.empty:
-            total = len(use)
-            pass_count = (use["outcome"]=="PASS").sum()
-            rft = 100.0 * pass_count / total
-            cA, cB, cC = st.columns(3)
-            cA.metric("Runs", f"{total}")
-            cB.metric("PASS", f"{pass_count}")
-            cC.metric("Right First Time", f"{rft:.1f}%")
+if allow_edit:
+    with st.expander("Rules Preview (read-only)", expanded=False):
+        st.json(rules_blob)
 
-            by_supplier = use.groupby("supplier")["outcome"].apply(lambda s: (s=="REJECTED").sum()).reset_index(name="Rejected")
-            st.bar_chart(by_supplier.set_index("supplier"))
-        else:
-            st.info("Nothing to analyse (all runs excluded).")
+# Mandatory checks
+def all_meta_filled() -> Tuple[bool, str]:
+    if supplier == "— Select —": return False, "Supplier is required."
+    if drawing_type == "— Select —": return False, "Drawing Type is required."
+    if client == "— Select —": return False, "Client is required."
+    if project == "— Select —": return False, "Project is required."
+    if site_type == "— Select —": return False, "Site Type is required."
+    if vendor == "— Select —": return False, "Proposed Vendor is required."
+    if cabinet_loc == "— Select —": return False, "Proposed Cabinet Location is required."
+    if radio_loc == "— Select —": return False, "Proposed Radio Location is required."
+    if sectors == "— Select —": return False, "Quantity of Sectors is required."
+    if not site_address.strip(): return False, "Site Address is required."
+    return True, ""
 
-# -----------------------------
-# SETTINGS TAB (password gated)
-# -----------------------------
-with tab_settings:
-    st.subheader("Settings")
-    pw = st.text_input("Admin password", type="password")
-    if pw != APP_PASSWORD:
-        st.warning("Enter the admin password to edit settings.")
+# ========== AUDIT ==========
+if audit_clicked:
+    ok, msg = all_meta_filled()
+    if not ok:
+        st.error(msg)
+        st.stop()
+    if not pdf_file:
+        st.error("Please upload a PDF to audit.")
         st.stop()
 
-    # Visibility horizon
-    st.markdown("#### Visibility")
-    st.session_state["ui_visibility_hours"] = st.select_slider(
-        "How long should runs stay VISIBLE in the app?",
-        options=[6,12,24,48,72,168],  # 168 = 7 days
-        value=st.session_state.get("ui_visibility_hours", DEFAULT_UI_VISIBILITY_HOURS),
-        help="This only affects the UI listing. Backups remain safely stored."
+    original_bytes = pdf_file.read()
+    file_name = pdf_file.name
+    pdf_title_guess = os.path.splitext(file_name)[0]
+
+    # Extract pages / text / bbox
+    pages = extract_pages(original_bytes)
+
+    # Findings
+    findings = []
+    findings += spelling_findings(pages, rules_blob.get("allowlist", []))
+    findings += run_rules(
+        pages,
+        rules_blob,
+        {
+            "supplier": supplier,
+            "drawing_type": drawing_type,
+            "client": client,
+            "project": project,
+            "site_type": site_type,
+            "vendor": vendor,
+            "cabinet_location": cabinet_loc,
+            "radio_location": radio_loc,
+            "sectors": sectors,
+            "site_address": site_address,
+            "mimo_s1": mimo_s1,
+            "mimo_s2": mimo_s2,
+            "mimo_s3": mimo_s3,
+        },
+        pdf_title_guess
     )
 
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Run cleanup now"):
-            res = clean_outputs(outputs_retention_days)
-            st.success(f"Deleted {len(res['deleted_by_age'])} old files + {len(res['deleted_by_size'])} for size cap.")
-    with c2:
-        st.caption(f"/outputs usage: {size_human(outputs_size_bytes())}  •  Cap: {size_human(MAX_OUTPUT_DIR_BYTES)}")
+    # Checklist (YAML) — add any hard fails if items missing
+    for item in rules_blob.get("checklist", []):
+        # {"id":"title_block_present", "must_contain":"TITLE BLOCK", "severity":"Major", "message":"Title block missing"}
+        must = (item.get("must_contain") or "").strip()
+        if must:
+            text_all = " ".join([p.get("text","") for p in pages]).upper()
+            if must.upper() not in text_all:
+                findings.append({
+                    "category": "Checklist",
+                    "severity": item.get("severity","Major"),
+                    "message": item.get("message","Checklist requirement not met"),
+                    "suggestion": f"Add '{must}'",
+                    "page": 1,
+                    "bbox": None,
+                    "rule_id": item.get("id","check_missing")
+                })
 
-    st.divider()
+    # Verdict
+    major_cnt = sum(1 for f in findings if str(f.get("severity","")).lower()=="major")
+    passed = (major_cnt == 0)
 
-    # Backups
-    st.markdown("#### Backups")
-    d1, d2, d3 = st.columns([1,1,2])
-    with d1:
-        if st.button("Run daily export now"):
-            try:
-                zp = export_daily_backup()
-                st.success(f"Backup created: {Path(zp).name}")
-            except Exception as e:
-                st.error(f"Backup failed: {e}")
-    with d2:
-        if st.button("Purge backups older than 60 days"):
-            res = clean_old_backups(BACKUP_RETENTION_DAYS)
-            st.success(f"Deleted {len(res['deleted'])} old backups.")
-    with d3:
-        st.caption("Backups include: history CSV snapshot + all current outputs + meta.json")
+    # Annotate
+    annotated_pdf = annotate_pdf(original_bytes, findings)
+    # Build report
+    meta_dict = {
+        "supplier": supplier,
+        "drawing_type": drawing_type,
+        "client": client,
+        "project": project,
+        "site_type": site_type,
+        "vendor": vendor,
+        "cabinet_location": cabinet_loc,
+        "radio_location": radio_loc,
+        "sectors": sectors,
+        "site_address": site_address,
+        "mimo_s1": mimo_s1,
+        "mimo_s2": mimo_s2,
+        "mimo_s3": mimo_s3,
+        "verdict": "PASS" if passed else "REJECTED",
+    }
+    df = build_report_df(findings, meta_dict, file_name)
+    xlsx_path, pdf_path = save_report_and_annotation(df, annotated_pdf, file_name, passed)
 
-    st.markdown("**Available Backups**")
-    bks = sorted(BACKUP_DIR.glob("backup_*.zip"), key=lambda p: p.name, reverse=True)
-    if not bks:
-        st.info("No backups yet. One will be created automatically at midnight (UK) or via the button.")
+    # Save to history
+    rec = {
+        "timestamp_utc": ts_iso(),
+        "file_name": file_name,
+        "supplier": supplier,
+        "drawing_type": drawing_type,
+        "client": client,
+        "project": project,
+        "site_type": site_type,
+        "vendor": vendor,
+        "cabinet_location": cabinet_loc,
+        "radio_location": radio_loc,
+        "sectors": sectors,
+        "site_address": site_address,
+        "mimo_s1": mimo_s1,
+        "mimo_s2": mimo_s2,
+        "mimo_s3": mimo_s3,
+        "verdict": "PASS" if passed else "REJECTED",
+        "findings_count": len(findings),
+        "major_count": major_cnt,
+        "exclude": bool(exclude_analytics),
+        "report_path": xlsx_path,
+        "annotated_pdf_path": pdf_path,
+    }
+    push_history(rec)
+
+    # UI summary
+    st.success("Audit complete.")
+    st.subheader("Summary")
+    colS1,colS2,colS3,colS4 = st.columns(4)
+    colS1.metric("Findings", len(findings))
+    colS2.metric("Major", major_cnt)
+    colS3.metric("Verdict", "PASS" if passed else "REJECTED")
+    colS4.metric("Supplier", supplier)
+
+    st.subheader("Downloads")
+    st.write(f"**Excel Report:** `{os.path.basename(xlsx_path)}`")
+    with open(xlsx_path, "rb") as f:
+        st.download_button("Download Excel Report", f, file_name=os.path.basename(xlsx_path), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.write(f"**Annotated PDF:** `{os.path.basename(pdf_path)}`")
+    with open(pdf_path, "rb") as f:
+        st.download_button("Download Annotated PDF", f, file_name=os.path.basename(pdf_path), mime="application/pdf")
+
+# ---------- HISTORY / ANALYTICS ----------
+st.markdown("---")
+st.subheader("Recent Runs")
+dfh = load_history()
+if dfh.empty:
+    st.info("No runs yet.")
+else:
+    # Visibility window
+    df_vis = filter_history_for_ui(dfh.copy(), st.session_state.get("ui_visibility_hours", DEFAULT_UI_VISIBILITY_HOURS))
+    # Respect exclude flag in analytics visuals (but still list files)
+    df_analytics = df_vis[df_vis.get("exclude", False) != True]
+
+    # Trendline / KPIs
+    colA1, colA2, colA3, colA4 = st.columns(4)
+    if not df_analytics.empty:
+        rft = (df_analytics["verdict"] == "PASS").mean() * 100
+        colA1.metric("Right First Time (%)", f"{rft:.1f}")
+        colA2.metric("Major Findings", int(df_analytics["major_count"].sum()))
+        colA3.metric("Total Findings", int(df_analytics["findings_count"].sum()))
+        colA4.metric("Runs", int(len(df_vis)))
+        # Simple trend by day & supplier
+        df_analytics["day"] = pd.to_datetime(df_analytics["timestamp_utc"], utc=True).dt.tz_convert("UTC").dt.date
+        daily = df_analytics.groupby(["day","supplier"])["major_count"].sum().reset_index()
+        st.line_chart(daily.pivot(index="day", columns="supplier", values="major_count").fillna(0))
     else:
-        for p in bks[:20]:
-            with open(p, "rb") as fh:
-                st.download_button(
-                    label=f"Download {p.name}",
-                    data=fh.read(),
-                    file_name=p.name,
-                    mime="application/zip",
-                    key=f"bk_{p.name}"
-                )
+        st.caption("Analytics excluded or empty for the current window.")
 
-    st.divider()
-
-    # Rules editor (simple)
-    st.markdown("#### Rules (YAML)")
-    current = RULES_PATH.read_text(encoding="utf-8") if RULES_PATH.exists() else yaml.safe_dump(load_rules(), sort_keys=False)
-    updated = st.text_area("rules_example.yaml", value=current, height=300)
-    c3, c4 = st.columns([1,3])
-    with c3:
-        if st.button("Save Rules"):
-            ok, msg = save_rules(updated)
-            if ok: st.success(msg)
-            else: st.error(msg)
-    with c4:
-        st.caption("Tip: Example structure:")
-        st.code("""checks:
-  spelling:
-    enabled: true
-    severity: minor
-  address_title_match:
-    enabled: true
-    severity: major
-  incompatible_terms:
-    enabled: true
-    severity: major
-    pairs:
-      - ["Brush", "Generator Power"]
-allowlist:
-  - MBNL
-  - Ericsson
-""", language="yaml")
+    # Show table of runs (including excluded)
+    show_cols = ["timestamp_utc","file_name","supplier","drawing_type","client","project","verdict","major_count","findings_count","exclude"]
+    for c in show_cols:
+        if c not in df_vis.columns:
+            df_vis[c] = ""
+    st.dataframe(df_vis[show_cols].sort_values("timestamp_utc", ascending=False), use_container_width=True)
