@@ -13,7 +13,7 @@ import streamlit as st
 import yaml
 from rapidfuzz import fuzz, process
 
-# Try to import PyMuPDF for annotation (optional)
+# Optional: PyMuPDF (annotations). If not present, annotated PDF is skipped gracefully.
 try:
     import fitz  # PyMuPDF
 except Exception:
@@ -23,6 +23,7 @@ except Exception:
 APP_ROOT = Path(__file__).parent
 HISTORY_PATH = APP_ROOT / "history" / "audit_history.csv"
 RULES_DEFAULT = APP_ROOT / "rules_example.yaml"
+ALLOWLIST_FILE = APP_ROOT / "allowlist.txt"  # persisted allowlist (one line, comma-separated)
 
 LOGO_ENV = os.getenv("LOGO_FILE") or (st.secrets.get("logo_file") if hasattr(st, "secrets") else None)
 LOGO_CANDIDATES = [
@@ -31,7 +32,7 @@ LOGO_CANDIDATES = [
     str(APP_ROOT / "logo.jpg"),
     str(APP_ROOT / "logo.jpeg"),
     str(APP_ROOT / "logo.svg"),
-    # user-provided specific name
+    # your uploaded file name (kept here for convenience)
     str(APP_ROOT / "88F3AB03-9D27-435B-AE39-7427F9A17FFC.png.png"),
 ]
 
@@ -46,12 +47,13 @@ SECTORS = ["1", "2", "3", "4", "5", "6"]
 SUPPLIERS = ["CEG", "CTIL", "Emfyser", "Innov8", "Invict", "KTL Team (Internal)", "Trylon"]
 DRAWING_TYPES = ["General Arrangement", "Detailed Design"]
 
-MANDATORY_FIELDS = [
+# MIMO is validated dynamically (required unless Power Resilience)
+MANDATORY_FIELDS_BASE = [
     "client","project","site_type","vendor","cabinet_loc","radio_loc",
     "sectors","supplier","drawing_type","site_address"
 ]
 
-# --------------------------- Helpers ---------------------------
+# --------------------------- Small helpers ---------------------------
 def _ensure_history():
     HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     if not HISTORY_PATH.exists():
@@ -72,15 +74,34 @@ def append_history(row: Dict[str, Any]):
 def load_rules(path: Union[str, Path]) -> Dict[str, Any]:
     p = Path(path)
     if not p.exists():
-        return {}
+        return {"checklist": []}
     with open(p, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        data = yaml.safe_load(f) or {}
+    if "checklist" not in data or not isinstance(data["checklist"], list):
+        data["checklist"] = []
+    return data
+
+def save_rules(path: Union[str, Path], data: Dict[str, Any]) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
+
+def load_allowlist() -> List[str]:
+    if ALLOWLIST_FILE.exists():
+        txt = ALLOWLIST_FILE.read_text(encoding="utf-8")
+        return [t.strip() for t in txt.split(",") if t.strip()]
+    # default bootstrap terms
+    return ["DIMENSION","DIMENSIONS","MM","STEEL","FOUNDATION","DRAWING","LAYOUT"]
+
+def save_allowlist(tokens: List[str]) -> None:
+    ALLOWLIST_FILE.write_text(",".join(sorted(set([t.strip() for t in tokens if t.strip()]))), encoding="utf-8")
 
 def normalize_text(s: str) -> str:
     return " ".join("".join(ch for ch in str(s).upper() if ch.isalnum() or ch.isspace()).split())
 
 def site_address_check(address: str, filename: str, ignore_pattern: str = ", 0 ,") -> Optional[Dict[str, Any]]:
-    """Skip if ', 0 ,' present. Else fuzzy-match address vs filename stem."""
+    """Skip if literal ', 0 ,' present in address. Else fuzzy-match address vs file stem."""
     if ignore_pattern in address:
         return None
     addr_norm = normalize_text(address)
@@ -105,7 +126,8 @@ def extract_pdf_texts(uploaded_file) -> Tuple[List[str], int]:
             text = ""
         return [text], 1
     else:
-        doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+        fbytes = uploaded_file.read()
+        doc = fitz.open(stream=fbytes, filetype="pdf")
         pages = [p.get_text("text") or "" for p in doc]
         n = len(doc)
         doc.close()
@@ -115,17 +137,22 @@ def spelling_checks(pages: List[str], allowlist: List[str]) -> List[Dict[str, An
     findings: List[Dict[str, Any]] = []
     if not allowlist:
         return findings
+    allow_upper = [a.upper() for a in allowlist]
     for i, txt in enumerate(pages, start=1):
         tokens = [t for t in normalize_text(txt).split() if len(t) > 3]
         for t in tokens:
-            matches = process.extract(t, allowlist, scorer=fuzz.WRatio, limit=1)
-            best = matches[0] if matches else None
+            # skip if token looks like an allowed word exactly
+            if t in allow_upper:
+                continue
+            # find best approximate match in allowlist; if it's too far, flag.
+            best = process.extractOne(t, allow_upper, scorer=fuzz.WRatio)
             if not best:
                 continue
-            cand, score, _ = best
+            _, score = best[0], best[1]
             if score < 60:
                 findings.append({
-                    "kind":"Spelling","message":f"Suspicious token '{t}' (closest '{cand}', {score}).",
+                    "kind":"Spelling",
+                    "message":f"Suspicious token '{t}' (closest allowlist score {score}).",
                     "page":i,"severity":"minor","bbox":None
                 })
     return findings
@@ -148,14 +175,14 @@ def annotate_pdf(original_bytes: bytes, findings: List[Dict[str, Any]]) -> Optio
         return None
     try:
         doc = fitz.open(stream=original_bytes, filetype="pdf")
-        red = (1,0,0)
         for f in findings:
             pg = f.get("page")
-            if pg is None or pg < 1 or pg > len(doc):
+            if pg is None or not (1 <= pg <= len(doc)):
                 continue
             page = doc[pg-1]
             msg = f'{f.get("kind","")}: {f.get("message","")}'
-            page.add_text_annot(page.rect.tl + (20, 40), msg)
+            # Add a simple text annotation near top-left margin
+            page.add_text_annot(page.rect.tl + (24, 48), msg)
         out = io.BytesIO()
         doc.save(out)
         doc.close()
@@ -175,26 +202,29 @@ def embed_logo_top_right():
     for cand in LOGO_CANDIDATES:
         if cand and Path(cand).exists():
             logo_path = cand; break
-    if not logo_path:
-        return
-    try:
-        b64 = base64.b64encode(Path(logo_path).read_bytes()).decode()
-        mime = "image/svg+xml" if str(logo_path).lower().endswith(".svg") else "image/png"
-        tag = f'<img src="data:{mime};base64,{b64}" class="top-right-logo" />'
-        st.markdown("""
-        <style>
-        .top-nav {display:flex; align-items:center; justify-content:space-between;
-                  padding:8px 4px 0 4px;}
-        .brand {font-weight:600; font-size:20px; opacity:.9;}
-        .top-right-logo{height:36px; opacity:.95;}
-        .card {background: rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08);
-               border-radius:10px; padding:14px;}
-        .muted {opacity:.7}
-        </style>
-        """, unsafe_allow_html=True)
-        st.markdown(f'<div class="top-nav"><div class="brand">AI Design QA</div>{tag}</div>', unsafe_allow_html=True)
-    except Exception:
-        pass
+    # style first
+    st.markdown("""
+    <style>
+      .top-nav {position: sticky; top: 0; z-index: 9999;
+                display:flex; align-items:center; justify-content:space-between;
+                background: var(--background-color, rgba(0,0,0,0));
+                padding: 6px 4px 2px 4px;}
+      .brand {font-weight:600; font-size:20px; opacity:.9;}
+      .top-right-logo{height:64px; opacity:.97; } /* <— bigger logo */
+      .card {background: rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08);
+             border-radius:10px; padding:14px;}
+      .muted {opacity:.7}
+    </style>
+    """, unsafe_allow_html=True)
+    tag = ""
+    if logo_path:
+        try:
+            b64 = base64.b64encode(Path(logo_path).read_bytes()).decode()
+            mime = "image/svg+xml" if str(logo_path).lower().endswith(".svg") else "image/png"
+            tag = f'<img src="data:{mime};base64,{b64}" class="top-right-logo" />'
+        except Exception:
+            pass
+    st.markdown(f'<div class="top-nav"><div class="brand">AI Design QA</div>{tag}</div>', unsafe_allow_html=True)
 
 # --------------------------- App UI ---------------------------
 st.set_page_config(page_title="AI Design QA", layout="wide")
@@ -204,17 +234,71 @@ tab_audit, tab_history, tab_settings = st.tabs(["🔎 Audit", "📈 History & An
 
 # ---------- Settings tab ----------
 with tab_settings:
-    st.subheader("Rule & Spell Settings")
-    rules_path = st.text_input("Rules YAML path", str(RULES_DEFAULT))
-    allowlist_csv = st.text_area(
-        "Spelling allowlist (comma separated)",
-        "DIMENSION,DIMENSIONS,MM,STEEL,FOUNDATION,DRAWING,LAYOUT"
+    st.subheader("Rules & Spelling — Simple Management")
+
+    # RULES: load current
+    rules_path_input = st.text_input("Rules YAML path", str(RULES_DEFAULT))
+    current_rules = load_rules(rules_path_input)
+
+    st.markdown("##### Quick Rule Builder")
+    with st.form("quick_rule_form"):
+        qr_name = st.text_input("Rule name (for your reference)", "")
+        qr_sev = st.selectbox("Severity", ["major","minor"], index=0)
+        qr_must = st.text_input("Must contain (comma-separated)", "")
+        qr_reject = st.text_input("Reject if present (comma-separated)", "")
+        add_rule = st.form_submit_button("Add Rule to YAML")
+        if add_rule:
+            new_rule = {
+                "name": qr_name or f"Rule {len(current_rules.get('checklist',[]))+1}",
+                "severity": qr_sev,
+                "must_contain": [t.strip() for t in qr_must.split(",") if t.strip()],
+                "reject_if_present": [t.strip() for t in qr_reject.split(",") if t.strip()],
+            }
+            current_rules.setdefault("checklist", []).append(new_rule)
+            try:
+                save_rules(rules_path_input, current_rules)
+                st.success(f"Rule added and saved to {rules_path_input}.")
+            except Exception as e:
+                st.error(f"Failed to save rule: {e}")
+
+    st.markdown("##### Full YAML Editor")
+    yaml_text = st.text_area(
+        "Edit your full rules YAML below and click Validate & Save.",
+        value=yaml.safe_dump(current_rules, sort_keys=False, allow_unicode=True),
+        height=260
     )
-    st.caption("Keep this list brief and relevant for best results.")
+    colY1, colY2 = st.columns([1,1])
+    with colY1:
+        if st.button("Validate & Save YAML", type="primary"):
+            try:
+                parsed = yaml.safe_load(yaml_text) or {}
+                if "checklist" in parsed and not isinstance(parsed["checklist"], list):
+                    raise ValueError("'checklist' must be a list")
+                save_rules(rules_path_input, parsed)
+                st.success("YAML validated and saved.")
+            except Exception as e:
+                st.error(f"YAML error: {e}")
+
+    with colY2:
+        st.download_button("Download current YAML", data=yaml_text.encode("utf-8"),
+                           file_name="rules_example.yaml", mime="text/yaml")
+
+    st.divider()
+    st.subheader("Spelling Allowlist")
+    existing_allow = load_allowlist()
+    allow_text = st.text_area(
+        "Comma-separated allowlist",
+        value=",".join(existing_allow),
+        height=100
+    )
+    if st.button("Save Allowlist"):
+        save_allowlist([t.strip() for t in allow_text.split(",")])
+        st.success("Allowlist saved.")
+
     st.divider()
     st.subheader("Logo")
-    st.write("Place `logo.png`/`logo.jpg`/`logo.svg` in the repo root, or set **LOGO_FILE** env/secret.")
-    st.code("logo_file = \"88F3AB03-9D27-435B-AE39-7427F9A17FFC.png.png\"  # in Streamlit secrets")
+    st.write("Place `logo.png`/`logo.jpg`/`logo.svg` in repo root, or set **LOGO_FILE** env/secret.")
+    st.code('logo_file = "88F3AB03-9D27-435B-AE39-7427F9A17FFC.png.png"  # in Streamlit secrets')
 
 # ---------- History tab ----------
 with tab_history:
@@ -228,6 +312,7 @@ with tab_history:
     else:
         st.subheader("Recent Runs")
         st.dataframe(dfh.sort_values("timestamp_utc", ascending=False).head(50), use_container_width=True)
+
         st.markdown("### Trends (excluded runs hidden)")
         df_use = dfh[dfh.get("exclude", False) != True].copy()
         if df_use.empty:
@@ -256,7 +341,7 @@ with tab_audit:
     st.subheader("Upload & Audit")
     up = st.file_uploader("Design PDF", type=["pdf"], accept_multiple_files=False)
 
-    # Metadata defaults in session
+    # Session defaults
     if "meta" not in st.session_state:
         st.session_state.meta = {
             "client": CLIENTS[0], "project": PROJECTS[0], "site_type": SITE_TYPES[0],
@@ -265,8 +350,8 @@ with tab_audit:
             "supplier": SUPPLIERS[0], "drawing_type": DRAWING_TYPES[0],
         }
 
-    allow = [t.strip() for t in (allowlist_csv if 'allowlist_csv' in locals() else "").split(",") if t.strip()]
-    rules_path_eff = rules_path if 'rules_path' in locals() else str(RULES_DEFAULT)
+    # Load allowlist from file each render (so Settings save takes effect)
+    allow = load_allowlist()
 
     with st.form("audit_form", clear_on_submit=False):
         st.markdown("#### Audit Metadata")
@@ -282,16 +367,20 @@ with tab_audit:
             st.session_state.meta["radio_loc"] = st.selectbox("Proposed Radio Location", RADIO_LOCS, index=RADIO_LOCS.index(st.session_state.meta["radio_loc"]))
             st.session_state.meta["sectors"] = st.selectbox("Quantity of Sectors", SECTORS, index=SECTORS.index(st.session_state.meta["sectors"]))
 
-            if st.session_state.meta["project"] != "Power Resilience":
-                st.session_state.meta["mimo_config"] = st.text_input("Proposed MIMO Config (optional)", st.session_state.meta["mimo_config"])
-            else:
+            # MIMO: optional for Power Resilience only; required otherwise
+            if st.session_state.meta["project"] == "Power Resilience":
                 st.info("Project is Power Resilience → MIMO not required.")
                 st.session_state.meta["mimo_config"] = ""
+            else:
+                st.session_state.meta["mimo_config"] = st.text_input("Proposed MIMO Config (optional for Power Resilience only)", st.session_state.meta["mimo_config"])
 
             st.session_state.meta["drawing_type"] = st.selectbox("Drawing Type", DRAWING_TYPES, index=DRAWING_TYPES.index(st.session_state.meta["drawing_type"]))
 
-        st.session_state.meta["site_address"] = st.text_input("Site Address", st.session_state.meta["site_address"],
-                                                             help="Must match the design filename/title. Ignored if ', 0 ,' present.")
+        st.session_state.meta["site_address"] = st.text_input(
+            "Site Address",
+            st.session_state.meta["site_address"],
+            help="Must match the design filename/title. Ignored if the literal ', 0 ,' appears."
+        )
 
         excl = st.checkbox("Exclude this audit from analytics", value=False)
 
@@ -311,17 +400,29 @@ with tab_audit:
         st.experimental_rerun()
 
     if submitted:
-        # Validate required fields
-        missing = [k for k in MANDATORY_FIELDS if not str(st.session_state.meta.get(k,"")).strip()]
+        # Dynamic mandatory fields (MIMO required unless Power Resilience)
+        required = MANDATORY_FIELDS_BASE.copy()
+        if st.session_state.meta["project"] != "Power Resilience":
+            # MIMO required for non-Power Resilience projects
+            if not str(st.session_state.meta.get("mimo_config","")).strip():
+                required = required + ["mimo_config"]
+
+        missing = [k for k in required if not str(st.session_state.meta.get(k,"")).strip()]
+
         if not up:
             st.error("Please upload a PDF to audit.")
         elif missing:
-            st.error(f"Please complete all required fields: {', '.join(missing)}.")
+            nice = {
+                "client":"Client","project":"Project","site_type":"Site Type","vendor":"Proposed Vendor",
+                "cabinet_loc":"Proposed Cabinet Location","radio_loc":"Proposed Radio Location","sectors":"Quantity of Sectors",
+                "supplier":"Supplier","drawing_type":"Drawing Type","site_address":"Site Address","mimo_config":"Proposed MIMO Config"
+            }
+            st.error("Please complete all required fields: " + ", ".join(nice.get(m, m) for m in missing) + ".")
         else:
-            # Load rules
-            rules = load_rules(rules_path_eff)
+            # Load rules from disk (reflect Settings changes)
+            rules = load_rules(rules_path_input)
 
-            # Extract text
+            # Get PDF text
             pages, page_count = extract_pdf_texts(up)
 
             # Findings
@@ -343,15 +444,13 @@ with tab_audit:
             outcome = "Pass" if total == 0 else "Rejected"
             rft_percent = 100.0 if outcome == "Pass" else max(0.0, 100.0 - (majors*10 + minors*2))
 
-            # Results card
             st.markdown("#### Results")
-            with st.container():
-                st.write(f"**Outcome:** {outcome} — **Major:** {majors}  •  **Minor:** {minors}  •  **RFT:** {rft_percent:.1f}%")
+            st.write(f"**Outcome:** {outcome} — **Major:** {majors}  •  **Minor:** {minors}  •  **RFT:** {rft_percent:.1f}%")
 
             df = pd.DataFrame(findings or [])
             st.dataframe(df, use_container_width=True)
 
-            # Exports
+            # Exports with stamped filenames
             base = Path(up.name).stem
             date_str = datetime.now().strftime("%Y-%m-%d")
             excel_name = f"{base}__{outcome}__{date_str}.xlsx"
