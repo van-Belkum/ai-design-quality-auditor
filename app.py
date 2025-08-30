@@ -1,276 +1,181 @@
-import re
-import io
-import os
-import ast
-import json
-import base64
-import yaml
-import fitz  # PyMuPDF
-import pandas as pd
-from datetime import datetime, timezone
-from spellchecker import SpellChecker
 import streamlit as st
+import pandas as pd
+import fitz  # PyMuPDF
+import io, os, base64, datetime
+from pathlib import Path
+from rapidfuzz import fuzz, process
 
-APP_VERSION = "rules-engine-v6-full"
+# -----------------------
+# Config
+# -----------------------
+st.set_page_config(page_title="AI Design QA", layout="wide")
 
-# ---------------- LOGO (top-right, always visible) ----------------
-logo_path = "212BAAC2-5CB6-46A5-A53D-06497B78CF23.png"
+# -----------------------
+# Logo auto-detect
+# -----------------------
+def _encode_image(fp: Path) -> str:
+    ext = fp.suffix.lower()
+    if ext == ".svg":
+        return f'data:image/svg+xml;base64,{base64.b64encode(fp.read_bytes()).decode()}'
+    mime = "image/png" if ext == ".png" else ("image/jpeg" if ext in [".jpg", ".jpeg"] else "image/octet-stream")
+    return f'data:{mime};base64,{base64.b64encode(fp.read_bytes()).decode()}'
 
-if os.path.exists(logo_path):
-    with open(logo_path, "rb") as f:
-        logo_base64 = base64.b64encode(f.read()).decode()
-    st.markdown(
-        f"""
-        <style>
-            .top-right-logo {{
-                position: fixed;
-                top: 10px;
-                right: 20px;
-                width: 120px;
-                z-index: 1000;
-            }}
-        </style>
-        <img src="data:image/png;base64,{logo_base64}" class="top-right-logo">
-        """,
-        unsafe_allow_html=True,
-    )
+def render_top_right_logo():
+    preferred = [
+        "88F3AB03-9D27-435B-AE39-7427F9A17FFC.png",
+        "212BAAC2-5CB6-46A5-A53D-06497B78CF23.png",
+        "logo.png", "seker.png", "seker.svg"
+    ]
+    root = Path(__file__).parent
+    for name in preferred:
+        p = root / name
+        if p.exists():
+            src = _encode_image(p)
+            st.markdown(f"""
+                <style>
+                  .top-right-logo {{
+                    position: fixed; top: 12px; right: 16px; z-index: 9999;
+                    width: 132px; height: auto; opacity: .95;
+                  }}
+                  @media (max-width: 900px) {{
+                    .top-right-logo {{ width: 96px; }}
+                  }}
+                </style>
+                <img src="{src}" class="top-right-logo" />
+                """, unsafe_allow_html=True)
+            return
+    st.info("⚠️ Logo file not found in repo root (png/svg/jpg).", icon="⚠️")
+
+render_top_right_logo()
+
+# -----------------------
+# Metadata state
+# -----------------------
+if "metadata" not in st.session_state:
+    st.session_state["metadata"] = {
+        "Client": "", "Project": "", "Site Type": "",
+        "Proposed Vendor": "", "Cabinet Location": "",
+        "Radio Location": "", "Sectors": "", "MIMO Config": "",
+        "Site Address": ""
+    }
+
+def clear_metadata():
+    for k in st.session_state["metadata"]:
+        st.session_state["metadata"][k] = ""
+
+# -----------------------
+# Metadata inputs
+# -----------------------
+st.sidebar.header("Audit Metadata")
+
+clients = ["BTEE", "Vodafone", "MBNL", "H3G", "Cornerstone", "Cellnex"]
+projects = ["RAN", "Power Resilience", "East Unwind", "Beacon 4"]
+site_types = ["Greenfield", "Rooftop", "Streetworks"]
+vendors = ["Ericsson", "Nokia"]
+cab_locs = ["Indoor", "Outdoor"]
+radio_locs = ["High Level", "Low Level", "Indoor", "Door"]
+sectors = ["1","2","3","4","5","6"]
+
+st.session_state["metadata"]["Client"] = st.sidebar.selectbox("Client", clients, index=0)
+st.session_state["metadata"]["Project"] = st.sidebar.selectbox("Project", projects, index=0)
+st.session_state["metadata"]["Site Type"] = st.sidebar.selectbox("Site Type", site_types, index=0)
+st.session_state["metadata"]["Proposed Vendor"] = st.sidebar.selectbox("Proposed Vendor", vendors, index=0)
+st.session_state["metadata"]["Cabinet Location"] = st.sidebar.selectbox("Proposed Cabinet Location", cab_locs, index=0)
+st.session_state["metadata"]["Radio Location"] = st.sidebar.selectbox("Proposed Radio Location", radio_locs, index=0)
+st.session_state["metadata"]["Sectors"] = st.sidebar.selectbox("Quantity of Sectors", sectors, index=0)
+
+# Hide MIMO if Project == Power Resilience
+if st.session_state["metadata"]["Project"] != "Power Resilience":
+    st.session_state["metadata"]["MIMO Config"] = st.sidebar.text_input("Proposed MIMO Config", value="")
 else:
-    st.sidebar.warning("⚠️ Logo file not found, place it in app root.")
+    st.session_state["metadata"]["MIMO Config"] = "N/A"
 
-# ---------------- Persistence ----------------
-def ensure_history():
-    os.makedirs("history", exist_ok=True)
-    sup_path = os.path.join("history", "suppressions.json")
-    if not os.path.exists(sup_path):
-        with open(sup_path, "w", encoding="utf-8") as f:
-            json.dump({"messages": [], "patterns": []}, f, indent=2)
-    log_path = os.path.join("history", "audit_log.csv")
-    if not os.path.exists(log_path):
-        pd.DataFrame(columns=["timestamp","file","status","findings","meta"]).to_csv(log_path, index=False)
-    return sup_path, log_path
+st.session_state["metadata"]["Site Address"] = st.sidebar.text_area("Site Address", value="")
 
-def read_suppressions():
-    sup_path, _ = ensure_history()
-    with open(sup_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+colb1, colb2 = st.sidebar.columns(2)
+run_audit = colb1.button("▶ Run Audit")
+colb2.button("🗑 Clear Metadata", on_click=clear_metadata)
 
-def update_suppressions(new_msgs):
-    sup_path, _ = ensure_history()
-    blob = read_suppressions()
-    msgs = set(blob.get("messages", []))
-    msgs.update(new_msgs)
-    blob["messages"] = sorted(msgs)
-    with open(sup_path, "w", encoding="utf-8") as f:
-        json.dump(blob, f, indent=2)
+# -----------------------
+# Helpers
+# -----------------------
+def extract_text_from_pdf(file_bytes):
+    text_pages, boxes = [], []
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    for i in range(len(doc)):
+        page = doc[i]
+        text_pages.append(page.get_text("text"))
+        boxes.append(page.get_text("blocks"))
+    return text_pages, boxes
 
-def log_audit(file, status, findings, meta: dict):
-    _, log_path = ensure_history()
-    row = pd.DataFrame([{
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-        "file": file,
-        "status": status,
-        "findings": findings,
-        "meta": json.dumps(meta, ensure_ascii=False),
-    }])
-    try:
-        old = pd.read_csv(log_path)
-        new = pd.concat([row, old], axis=0, ignore_index=True).head(300)
-        new.to_csv(log_path, index=False)
-    except Exception:
-        row.to_csv(log_path, index=False)
-
-# ---------------- Rules Engine ----------------
-def load_rules(upload) -> dict:
-    try:
-        if upload is None:
-            with open("rules_example.yaml","r",encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
-        else:
-            return yaml.safe_load(upload) or {}
-    except Exception as e:
-        st.error(f"Rules YAML load error: {e}")
-        return {}
-
-def when_matches(when: dict, meta: dict) -> bool:
-    if not when: return True
-    for k, v in when.items():
-        if meta.get(k) != v: return False
-    return True
-
-def run_rules(rules: dict, pages: list, doc, meta: dict) -> list:
+def spelling_checks(pages, allow):
     findings = []
-    all_text = " ".join(pages)
-
-    for chk in rules.get("checks", []):
-        if not when_matches(chk.get("when", {}), meta):
-            continue
-        cid = chk.get("id", "RULE")
-        sev = chk.get("severity","low")
-        typ = chk.get("type")
-
-        if typ == "include_text":
-            txt = chk.get("text")
-            if txt and txt.lower() not in all_text.lower():
-                findings.append({"page":0,"kind":"Checklist","rule_id":cid,
-                                 "message":f"Missing required text: '{txt}'",
-                                 "severity":sev,"term":txt})
-
-        elif typ == "forbid_together":
-            a, b = chk.get("a",""), chk.get("b","")
-            if a.lower() in all_text.lower() and b.lower() in all_text.lower():
-                findings.append({"page":0,"kind":"Consistency","rule_id":cid,
-                                 "message":f"Forbidden together: {a}+{b}",
-                                 "severity":sev,"term":a})
-
-        elif typ == "regex_forbid":
-            rgx = chk.get("regex")
-            hint = chk.get("hint","")
-            if rgx and re.search(rgx, all_text, re.I|re.M):
-                msg = f"Forbidden pattern: /{rgx}/ {hint}"
-                findings.append({"page":0,"kind":"Consistency","rule_id":cid,
-                                 "message":msg,"severity":sev,"term":rgx})
-
+    for pi, page in enumerate(pages, start=1):
+        words = page.split()
+        for w in words:
+            wl = w.strip().lower()
+            if wl and wl not in allow:
+                sug = process.extractOne(wl, allow, scorer=fuzz.ratio)
+                if sug and sug[1] > 80:  # close match
+                    findings.append({
+                        "page": pi,
+                        "kind": "Spelling",
+                        "message": f"Possible typo: '{w}' → '{sug[0]}'",
+                        "boxes": None
+                    })
     return findings
 
-# ---------------- Spelling ----------------
-def spelling_checks(pages, allowlist:set):
-    sp = SpellChecker(distance=1)
-    out=[]
-    for i, page in enumerate(pages, start=1):
-        for w in re.findall(r"[A-Za-z][A-Za-z'\-]{1,}", page):
-            wl=w.lower()
-            if wl in allowlist or wl in sp: 
-                continue
-            # --- Safe suggestion lookup ---
-            cands=[]
-            try:
-                cands=list(sp.candidates(wl) or [])
-            except Exception:
-                cands=[]
-            if cands:
-                sug=cands[0]
-                if sug and sug != wl:
-                    out.append({"page":i,"kind":"Spelling","rule_id":"SPELL",
-                                "message":f"Possible typo: '{w}'→'{sug}'",
-                                "severity":"low","term":w})
-    return out
-
-# ---------------- Annotation ----------------
-def annotate_pdf(pdf_bytes:bytes, findings:list)->bytes:
-    if not findings: return pdf_bytes
-    buf_in=io.BytesIO(pdf_bytes)
-    doc=fitz.open(stream=buf_in,filetype="pdf")
-
+def annotate_pdf(file_bytes, findings):
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
     for f in findings:
-        pno=f.get("page",0)
-        if not pno or pno>len(doc): continue
-        page=doc[pno-1]
-        term=f.get("term")
-        msg=f"[{f.get('kind')}] {f.get('message')}"
-        if term:
-            quads=page.search_for(term,quads=True)
-            if quads:
-                rect=fitz.Rect(quads[0].rect)
-                page.add_text_annot(rect.tl,msg)
-    out=io.BytesIO()
+        if f.get("boxes"):
+            page = doc[f["page"] - 1]
+            bbox = f["boxes"]
+            if bbox and len(bbox) == 4:
+                rect = fitz.Rect(bbox)
+                page.add_rect_annot(rect).set_colors(stroke=(1, 0, 0))
+    out = io.BytesIO()
     doc.save(out)
-    doc.close()
     return out.getvalue()
 
-# ---------------- UI ----------------
-st.title("AI Design Quality Auditor")
-st.caption(f"Build {APP_VERSION}")
+# -----------------------
+# Main Audit
+# -----------------------
+st.title("📑 AI Design QA")
 
-# ---- Metadata ----
-client=st.sidebar.selectbox("Client",["","BTEE","Vodafone","MBNL","H3G","Cornerstone","Cellnex"])
-project=st.sidebar.selectbox("Project",["","RAN","Power Resilience","East Unwind","Beacon 4"])
-site=st.sidebar.selectbox("Site Type",["","Greenfield","Rooftop","Streetworks"])
-vendor=st.sidebar.selectbox("Vendor",["","Ericsson","Nokia"])
-cab=st.sidebar.selectbox("Cabinet",["","Indoor","Outdoor"])
-radio=st.sidebar.selectbox("Radio",["","High Level","Low Level","Indoor","Door"])
-sectors=st.sidebar.selectbox("Sectors",["","1","2","3","4","5","6"])
-mimo="" if project=="Power Resilience" else st.sidebar.text_input("MIMO Config")
-site_addr=st.sidebar.text_area("Site Address",height=60)
-
-if st.sidebar.button("Clear Metadata"):
-    st.session_state.clear()
-    st.rerun()
-
-rules_file=st.sidebar.file_uploader("Rules YAML",type=["yaml","yml"])
-feedback_csv=st.sidebar.file_uploader("Feedback CSV",type=["csv"])
-if feedback_csv is not None:
-    try:
-        df_fb=pd.read_csv(feedback_csv)
-        bad=df_fb.loc[df_fb["decision"].str.lower().str.contains("not valid"),"message"].tolist()
-        update_suppressions(bad)
-        st.sidebar.success(f"Stored {len(bad)} suppressions")
-    except Exception as e:
-        st.sidebar.error(str(e))
-
-rules=load_rules(rules_file)
-
-# ---- File ----
-pdf=st.file_uploader("Upload PDF",type=["pdf"])
-
-meta_complete=all([client,project,site,vendor,cab,radio,sectors,site_addr or mimo!=""])
-
-if st.button("Run Audit",disabled=not(pdf and meta_complete)):
-    if not meta_complete:
-        st.error("Fill ALL metadata fields")
-    elif not pdf:
-        st.error("Upload a PDF")
+uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
+if run_audit and uploaded:
+    # Check metadata required
+    missing = [k for k,v in st.session_state["metadata"].items() if v.strip()==""]
+    if missing:
+        st.error(f"Please fill all metadata before running audit: {', '.join(missing)}")
     else:
-        data=pdf.read()
-        doc=fitz.open(stream=data,filetype="pdf")
-        pages=[p.get_text("text") for p in doc]
+        bytes_in = uploaded.read()
+        pages, boxes = extract_text_from_pdf(bytes_in)
 
-        allow=set(rules.get("allowlist",[]))
-        findings=[]
-        findings+=spelling_checks(pages,allow)
-        findings+=run_rules(rules,pages,doc,{
-            "client":client,"project":project,"site":site,"vendor":vendor,
-            "cab":cab,"radio":radio,"sectors":sectors,"mimo":mimo,"site_addr":site_addr
-        })
+        allow = set(["the","and","site","cabinet","antenna"])  # demo allowlist
+        findings = []
+        findings += spelling_checks(pages, allow)
 
-        sup=read_suppressions()
-        df=pd.DataFrame(findings)
-        if not df.empty:
-            df=df[~df["message"].isin(sup.get("messages",[]))]
-
-        status="PASS" if df.empty else "REJECTED"
-        st.subheader("Summary")
-        st.write({"File":pdf.name,"Status":status,"Pages":len(pages),"Findings":len(df)})
-
+        df = pd.DataFrame(findings)
         st.subheader("Findings")
-        st.dataframe(df)
+        if df.empty:
+            st.success("✅ No issues found, QA Pass. Please continue with Second Check.")
+            status = "Pass"
+        else:
+            st.error("❌ Issues found, QA Rejected.")
+            st.dataframe(df)
+            status = "Rejected"
 
-        today=datetime.now().strftime("%Y%m%d")
-        base=os.path.splitext(pdf.name)[0]
+        # Save Excel
+        fname = uploaded.name.replace(".pdf","")
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+        xname = f"{fname}_{status}_{ts}.xlsx"
+        df.to_excel(xname, index=False)
+        with open(xname,"rb") as f:
+            st.download_button("⬇ Download Excel Report", f, file_name=xname)
 
-        # Excel
-        buf=io.BytesIO()
-        with pd.ExcelWriter(buf,engine="openpyxl") as xw:
-            df.to_excel(xw,sheet_name="Findings",index=False)
-            pd.DataFrame([{
-                "client":client,"project":project,"site":site,"vendor":vendor,
-                "cab":cab,"radio":radio,"sectors":sectors,"mimo":mimo,"site_addr":site_addr
-            }]).to_excel(xw,sheet_name="Metadata",index=False)
-        st.download_button("Download Excel",buf.getvalue(),file_name=f"{base}_{status}_{today}.xlsx")
-
-        # Annotated PDF
-        ann=annotate_pdf(data,df.to_dict("records"))
-        st.download_button("Download Annotated PDF",ann,file_name=f"{base}_{status}_{today}.pdf")
-
-        log_audit(pdf.name,status,len(df),{
-            "client":client,"project":project,"site":site,"vendor":vendor,
-            "cab":cab,"radio":radio,"sectors":sectors,"mimo":mimo,"site_addr":site_addr
-        })
-
-# ---- History ----
-st.divider()
-st.subheader("History")
-try:
-    hist=pd.read_csv(os.path.join("history","audit_log.csv"))
-    st.dataframe(hist)
-except: 
-    st.info("No history yet")
+        # Save annotated PDF
+        pdf_bytes = annotate_pdf(bytes_in, findings)
+        pname = f"{fname}_{status}_{ts}_annotated.pdf"
+        st.download_button("⬇ Download Annotated PDF", pdf_bytes, file_name=pname)
