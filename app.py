@@ -2,308 +2,261 @@
 import io
 import os
 import re
+import json
+import time
 import fitz  # PyMuPDF
 import yaml
-import base64
 import pandas as pd
-from datetime import datetime
 import streamlit as st
+from rapidfuzz import fuzz
 
-APP_TITLE = "AI Design QA v7"
-HISTORY_DIR = "history"
-HISTORY_CSV = os.path.join(HISTORY_DIR, "history.csv")
-
+APP_TITLE = "AI Design QA v6 (Revert - no MIMO)"
+HISTORY_PATH = "history/history.csv"
 DEFAULT_RULES_FILE = "rules_example.yaml"
 
-# -------------------------- Utils --------------------------
+# --------------------------- Rules I/O ---------------------------
+def load_rules(path: str) -> dict:
+    if not os.path.exists(path):
+        return {
+            "required_phrases": ["ALL DIMENSIONS IN MM"],
+            "forbidden_pairs": [
+                {"if_contains": "Brush", "must_not_contain": "Generator Power"},
+                {"if_contains": "Generator Power", "must_not_contain": "Brush"},
+            ],
+            "allowlist": [],
+            "suppress_patterns": [],
+        }
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    # Ensure keys exist
+    data.setdefault("required_phrases", [])
+    data.setdefault("forbidden_pairs", [])
+    data.setdefault("allowlist", [])
+    data.setdefault("suppress_patterns", [])
+    return data
 
-def load_rules(file_or_bytes: bytes | None):
-    """Load YAML rules either from uploaded file or from default file on disk."""
-    if file_or_bytes is None:
-        path = DEFAULT_RULES_FILE if os.path.exists(DEFAULT_RULES_FILE) else None
-        if path is None:
-            return {"required_phrases": [], "forbidden_pairs": [], "suppress_patterns": [], "meta": {}}
-        with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    else:
-        return yaml.safe_load(file_or_bytes) or {}
-
-def save_rules(rules: dict, dest_path: str = DEFAULT_RULES_FILE):
-    with open(dest_path, "w", encoding="utf-8") as f:
+def save_rules(path: str, rules: dict):
+    with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(rules, f, sort_keys=False, allow_unicode=True)
 
-def extract_text_from_pdf(file_bytes: bytes) -> list[str]:
-    """Return a list of page texts using PyMuPDF."""
-    texts = []
-    with fitz.open(stream=io.BytesIO(file_bytes), filetype="pdf") as doc:
-        for page in doc:
-            texts.append(page.get_text("text") or "")
-    return texts
+# --------------------------- PDF helpers ---------------------------
+def pdf_to_pages(file_bytes: bytes):
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    pages = []
+    for i, page in enumerate(doc):
+        text = page.get_text("text") or ""
+        pages.append({"index": i+1, "text": text})
+    doc.close()
+    return pages
 
-def pass_fail_text(success: bool) -> str:
-    return "PASS" if success else "REJECTED"
-
-def append_history(row: dict):
-    os.makedirs(HISTORY_DIR, exist_ok=True)
-    if os.path.exists(HISTORY_CSV):
-        df = pd.read_csv(HISTORY_CSV)
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    else:
-        df = pd.DataFrame([row])
-    df.to_csv(HISTORY_CSV, index=False)
-
-def make_download_link(buffer: bytes, filename: str, label: str = "Download"):
-    b64 = base64.b64encode(buffer).decode()
-    return f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{label}</a>'
-
-def normalize(s: str) -> str:
-    return (s or "").strip()
-
-# -------------------------- Rule Checks --------------------------
-
-def check_required_phrases(text_pages: list[str], rules: dict) -> list[dict]:
+# --------------------------- Checks ---------------------------
+def check_required_phrases(pages, required_phrases):
     findings = []
-    required = rules.get("required_phrases", [])
-    for item in required:
-        if isinstance(item, dict):
-            phrase = normalize(item.get("text"))
-            where = item.get("where", "anywhere")
-        else:
-            phrase = normalize(str(item))
-            where = "anywhere"
-
-        if not phrase:
-            continue
-
-        present = False
-        pages_hit = []
-        for i, page_text in enumerate(text_pages, start=1):
-            if phrase.lower() in page_text.lower():
-                present = True
-                pages_hit.append(i)
-        if not present:
+    for phrase in required_phrases:
+        found = False
+        for p in pages:
+            if phrase.lower() in p["text"].lower():
+                found = True
+                break
+        if not found:
             findings.append({
+                "file": "",
+                "page": None,
                 "kind": "Checklist",
-                "page": "",
-                "message": f"Missing required text: '{phrase}'"
+                "message": f"Missing required text: '{phrase}'",
+                "boxes": ""
             })
     return findings
 
-def check_forbidden_pairs(text_pages: list[str], rules: dict) -> list[dict]:
+def check_forbidden_pairs(pages, pairs):
     findings = []
-    pairs = rules.get("forbidden_pairs", [])
-    doc_text = "\n".join(text_pages).lower()
-
-    for pair in pairs:
-        left = [s.lower() for s in pair.get("left", [])]
-        right = [s.lower() for s in pair.get("right", [])]
-        if not left or not right:
+    for rule in pairs:
+        a = rule.get("if_contains","")
+        b = rule.get("must_not_contain","")
+        if not a or not b:
             continue
-
-        left_hit = any(w in doc_text for w in left)
-        right_hit = any(w in doc_text for w in right)
-
-        if left_hit and right_hit:
-            findings.append({
-                "kind": "Consistency",
-                "page": "",
-                "message": f"Forbidden combination detected: left={pair.get('left')} right={pair.get('right')}"
-            })
+        pages_with_a = [p for p in pages if a.lower() in p["text"].lower()]
+        pages_with_b = [p for p in pages if b.lower() in p["text"].lower()]
+        if pages_with_a and pages_with_b:
+            pages_hit = sorted({p["index"] for p in pages_with_a + pages_with_b})
+            for idx in pages_hit:
+                findings.append({
+                    "file": "",
+                    "page": idx,
+                    "kind": "Consistency",
+                    "message": f"Forbidden together: '{a}' with '{b}'",
+                    "boxes": ""
+                })
     return findings
 
-def apply_suppressions(findings: list[dict], rules: dict) -> list[dict]:
-    """Remove findings that match any substring in suppress_patterns."""
-    suppress = [s.lower() for s in rules.get("suppress_patterns", [])]
-    if not suppress:
+def check_spelling_like(pages, allowlist):
+    # Very light-weight: flag words longer than 4 that are low similarity
+    # to their own lowercase (simulating a typo scan) but allowlist disables.
+    # Placeholder for your previous heavier spell logic.
+    findings = []
+    allow = set([w.lower() for w in allowlist or []])
+    word_re = re.compile(r"[A-Za-z]{5,}")
+    for p in pages:
+        words = word_re.findall(p["text"])
+        for w in set(words):
+            lw = w.lower()
+            if lw in allow:
+                continue
+            # Heuristic: weird case or repeated letters
+            if re.search(r"(.)\1\1", w) or (w != w.lower() and w != w.upper() and fuzz.ratio(w, w.lower()) < 90):
+                findings.append({
+                    "file": "",
+                    "page": p["index"],
+                    "kind": "Spelling",
+                    "message": f"Suspicious token: '{w}'",
+                    "boxes": ""
+                })
+    return findings
+
+def apply_suppression(findings, suppress_patterns):
+    if not suppress_patterns:
         return findings
     kept = []
     for f in findings:
-        msg = f.get("message", "").lower()
-        if any(p in msg for p in suppress):
+        msg = f.get("message","").lower()
+        if any(pat.lower() in msg for pat in suppress_patterns):
             continue
         kept.append(f)
     return kept
 
-# -------------------------- UI --------------------------
+# --------------------------- History ---------------------------
+def append_history(row: dict):
+    cols = ["timestamp_utc","user","stage","client","file","pages","used_ocr","total_findings","outcome"]
+    os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+    if not os.path.exists(HISTORY_PATH):
+        pd.DataFrame(columns=cols).to_csv(HISTORY_PATH, index=False)
+    df = pd.read_csv(HISTORY_PATH)
+    # align columns
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+    df.loc[len(df)] = [row.get(c) for c in cols]
+    df.to_csv(HISTORY_PATH, index=False)
 
+def load_history(n=200):
+    if not os.path.exists(HISTORY_PATH):
+        return pd.DataFrame(columns=["timestamp_utc","user","stage","client","file","pages","used_ocr","total_findings","outcome"])
+    df = pd.read_csv(HISTORY_PATH)
+    return df.tail(n).iloc[::-1]
+
+# --------------------------- Excel export ---------------------------
+def export_findings_xlsx(findings_df, original_name, status):
+    date = time.strftime("%Y%m%d")
+    base = os.path.splitext(original_name)[0]
+    out_name = f"{base}__{status}__{date}.xlsx"
+    with pd.ExcelWriter(out_name, engine="openpyxl") as writer:
+        findings_df.to_excel(writer, index=False, sheet_name="Findings")
+    return out_name
+
+# --------------------------- UI ---------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 
-left, right = st.columns([1,2])
+with st.sidebar:
+    st.header("Audit details")
+    rules_file = st.text_input("Rules file", value=DEFAULT_RULES_FILE)
+    user_name = st.text_input("Your name", value="qa_user")
+    # Metadata (no MIMO here)
+    client = st.selectbox("Client", ["BTEE","Vodafone","MBNL","H3G","Cornerstone","Cellnex"], index=0)
+    project = st.text_input("Project")
+    site_type = st.selectbox("Site Type", ["Greenfield","Rooftop","Streetworks"])
+    vendor = st.selectbox("Proposed Vendor", ["Ericsson","Nokia"])
+    cab_loc = st.selectbox("Proposed Cabinet Location", ["Indoor","Outdoor"])
+    radio_loc = st.selectbox("Proposed Radio Location", ["High Level","Low Level","Indoor","Door"])
+    site_address = st.text_area("Site Address", height=80)
 
-with left:
-    st.subheader("Audit setup")
-
-    # Load rules
-    rules_file = st.file_uploader("Load rules YAML (optional)", type=["yaml", "yml"])
-    rules = load_rules(rules_file.read() if rules_file else None)
-    if "suppress_patterns" not in rules:
-        rules["suppress_patterns"] = []
-
-    # Meta picklists
-    meta = rules.get("meta", {})
-    clients = meta.get("clients", [])
-    projects = meta.get("projects", [])
-    site_types = meta.get("site_types", [])
-    vendors = meta.get("vendors", [])
-    cabinet_locations = meta.get("cabinet_locations", [])
-    radio_locations = meta.get("radio_locations", [])
-
-    client = st.selectbox("Client", options=clients or ["--"], index=0)
-    project = st.selectbox("Project", options=projects or ["--"], index=0)
-    site_type = st.selectbox("Site Type", options=site_types or ["--"], index=0)
-    vendor = st.selectbox("Proposed Vendor", options=vendors or ["--"], index=0)
-    cabinet_loc = st.selectbox("Proposed Cabinet Location", options=cabinet_locations or ["--"], index=0)
-    radio_loc = st.selectbox("Proposed Radio Location", options=radio_locations or ["--"], index=0)
-
-    st.markdown("**Proposed MIMO**")
-    same_across = st.checkbox("Same across S1/S2/S3", value=True)
-    mimo_options = [
-        "18\\21 @2x2",
-        "18\\21\\26 @4x4",
-        "18\\21\\26 @4x4; 3500 @8x8",
-        "18\\21\\26 @4x4; 70\\80 @2x4; 3500 @32x32",
-        "18 @2x2",
-    ]
-    s1 = st.selectbox("Proposed Mimo S1", options=mimo_options, index=0)
-    if same_across:
-        s2 = s1
-        s3 = s1
-        st.caption(f"S2 and S3 set to S1 ({s1})")
-    else:
-        s2 = st.selectbox("Proposed Mimo S2", options=mimo_options, index=0)
-        s3 = st.selectbox("Proposed Mimo S3", options=mimo_options, index=0)
-
-    site_address = st.text_input("Site Address", "")
-
-    pdf_file = st.file_uploader("Upload a single PDF", type=["pdf"])
-
-    run = st.button("Run Audit", type="primary")
-
-with right:
-    st.subheader("Results")
-
-    if run and pdf_file is not None:
-        pdf_bytes = pdf_file.read()
-        text_pages = extract_text_from_pdf(pdf_bytes)
-
-        # Rule checks
-        findings = []
-        findings += check_required_phrases(text_pages, rules)
-        findings += check_forbidden_pairs(text_pages, rules)
-
-        # Apply suppressions (learned "not valid")
-        findings = apply_suppressions(findings, rules)
-
-        # Build results table
-        df = pd.DataFrame(findings) if findings else pd.DataFrame(columns=["kind", "page", "message"])
-        total = len(df)
-        status = pass_fail_text(total == 0)
-
-        st.metric("Outcome", status)
-        st.metric("Findings", total)
-
-        # Findings table with "Not valid?" selection
-        if total > 0:
-            df_show = df.copy()
-            df_show["Not valid? (ignore next time)"] = False
-            edited = st.data_editor(df_show, num_rows="dynamic", use_container_width=True)
-
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Apply learning (add selected to suppressions)"):
-                    selected = edited[edited["Not valid? (ignore next time)"] == True]
-                    if not selected.empty:
-                        new_patterns = list({m for m in selected["message"].tolist()})
-                        rules["suppress_patterns"] = list({*rules.get("suppress_patterns", []), *new_patterns})
-                        save_rules(rules)  # write back to rules_example.yaml
-                        st.success(f"Added {len(new_patterns)} message pattern(s) to suppressions and saved rules.")
-                    else:
-                        st.info("No rows were marked as Not valid.")
-
-            with col2:
-                # Export Excel
-                today = datetime.utcnow().strftime("%Y%m%d")
-                base_name = os.path.splitext(pdf_file.name)[0]
-                out_name = f"{base_name}__{status}__{today}.xlsx"
-                with pd.ExcelWriter(out_name, engine="openpyxl") as xw:
-                    # Summary sheet
-                    summary = pd.DataFrame([{
-                        "file": pdf_file.name,
-                        "status": status,
-                        "client": client,
-                        "project": project,
-                        "site_type": site_type,
-                        "vendor": vendor,
-                        "cabinet_location": cabinet_loc,
-                        "radio_location": radio_loc,
-                        "mimo_s1": s1, "mimo_s2": s2, "mimo_s3": s3,
-                        "address": site_address,
-                        "total_findings": total,
-                        "timestamp_utc": datetime.utcnow().isoformat(timespec="seconds")
-                    }])
-                    summary.to_excel(xw, index=False, sheet_name="Summary")
-                    df.to_excel(xw, index=False, sheet_name="Findings")
-                with open(out_name, "rb") as f:
-                    st.markdown(make_download_link(f.read(), out_name, "Download Excel report"), unsafe_allow_html=True)
-
-        else:
-            st.success("No findings. Document PASSED. You can still export an empty report below.")
-            # Even with no findings, allow export
-            today = datetime.utcnow().strftime("%Y%m%d")
-            base_name = os.path.splitext(pdf_file.name)[0]
-            out_name = f"{base_name}__{status}__{today}.xlsx"
-            with pd.ExcelWriter(out_name, engine="openpyxl") as xw:
-                summary = pd.DataFrame([{
-                    "file": pdf_file.name,
-                    "status": status,
-                    "client": client,
-                    "project": project,
-                    "site_type": site_type,
-                    "vendor": vendor,
-                    "cabinet_location": cabinet_loc,
-                    "radio_location": radio_loc,
-                    "mimo_s1": s1, "mimo_s2": s2, "mimo_s3": s3,
-                    "address": site_address,
-                    "total_findings": 0,
-                    "timestamp_utc": datetime.utcnow().isoformat(timespec="seconds")
-                }])
-                empty = pd.DataFrame(columns=["kind", "page", "message"])
-                summary.to_excel(xw, index=False, sheet_name="Summary")
-                empty.to_excel(xw, index=False, sheet_name="Findings")
-            with open(out_name, "rb") as f:
-                st.markdown(make_download_link(f.read(), out_name, "Download Excel report"), unsafe_allow_html=True)
-
-        # Append to history
-        append_history({
-            "timestamp_utc": datetime.utcnow().isoformat(timespec="seconds"),
-            "user": st.experimental_user.email if hasattr(st.experimental_user, "email") else "",
-            "file": pdf_file.name,
-            "client": client,
-            "project": project,
-            "site_type": site_type,
-            "vendor": vendor,
-            "mimo_s1": s1, "mimo_s2": s2, "mimo_s3": s3,
-            "status": status,
-            "total_findings": total,
-        })
-
-    with st.expander("Rules (view / edit raw YAML)"):
-        st.caption("These are the currently loaded rules. When you click **Apply learning** above, "
-                   "messages you marked as 'Not valid' will be added to `suppress_patterns` below, and saved.")
-        rules_text = st.text_area("YAML", value=yaml.safe_dump(rules, sort_keys=False, allow_unicode=True), height=240)
+    st.divider()
+    st.caption("Rules editor")
+    rules = load_rules(rules_file)
+    if st.checkbox("Show / edit YAML", value=False):
+        yaml_text = st.text_area("rules yaml", value=yaml.safe_dump(rules, sort_keys=False, allow_unicode=True), height=220)
         if st.button("Save YAML"):
             try:
-                new_rules = yaml.safe_load(rules_text) or {}
-                save_rules(new_rules)
-                st.success("Rules saved to rules_example.yaml")
+                new_rules = yaml.safe_load(yaml_text) or {}
+                save_rules(rules_file, new_rules)
+                st.success("Saved rules.")
+                rules = new_rules
             except Exception as e:
-                st.error(f"Failed to parse YAML: {e}")
+                st.error(f"YAML error: {e}")
 
-    with st.expander("History (latest 200)"):
-        if os.path.exists(HISTORY_CSV):
-            dfh = pd.read_csv(HISTORY_CSV)
-            dfh = dfh.sort_values("timestamp_utc", ascending=False).head(200)
-            st.dataframe(dfh, use_container_width=True, height=300)
-        else:
-            st.info("No history yet.")
+st.subheader("1) Upload a single PDF")
+pdf_file = st.file_uploader("PDF", type=["pdf"])
+
+if pdf_file is not None:
+    file_bytes = pdf_file.read()
+    pages = pdf_to_pages(file_bytes)
+
+    st.subheader("2) Run audit")
+    if st.button("Audit now", use_container_width=True):
+        with st.spinner("Auditing…"):
+            all_findings = []
+            # Checks
+            all_findings += check_required_phrases(pages, rules.get("required_phrases", []))
+            all_findings += check_forbidden_pairs(pages, rules.get("forbidden_pairs", []))
+            all_findings += check_spelling_like(pages, rules.get("allowlist", []))
+            # Attach file name
+            for f in all_findings:
+                f["file"] = pdf_file.name
+            # Apply suppression from learning
+            all_findings = apply_suppression(all_findings, rules.get("suppress_patterns", []))
+
+        # Display summary
+        counts = pd.Series([f["kind"] for f in all_findings]).value_counts().to_dict()
+        cols = st.columns(6)
+        cols[0].metric("Spelling", counts.get("Spelling", 0))
+        cols[1].metric("Checklist", counts.get("Checklist", 0))
+        cols[2].metric("Consistency", counts.get("Consistency", 0))
+        cols[3].metric("Data", 0)
+        cols[4].metric("Structural", 0)
+        cols[5].metric("Electrical", 0)
+
+        status = "Pass" if len(all_findings) == 0 else "Rejected"
+        st.success("QA PASS – please continue with second check.") if status=="Pass" else st.error("REJECTED – errors found.")
+
+        # Findings table with learning
+        if all_findings:
+            df = pd.DataFrame(all_findings, columns=["file","page","kind","message","boxes"])
+            df["Not valid? (ignore next time)"] = False
+            st.subheader("Findings")
+            st.dataframe(df, use_container_width=True)
+
+            # Apply learning
+            if st.button("Apply learning (suppress selected messages)"):
+                to_suppress = df.loc[df["Not valid? (ignore next time)"]==True, "message"].tolist()
+                if to_suppress:
+                    rules = load_rules(rules_file)
+                    sup = rules.get("suppress_patterns", [])
+                    for m in to_suppress:
+                        frag = m.strip()
+                        if frag and frag not in sup:
+                            sup.append(frag)
+                    rules["suppress_patterns"] = sup
+                    save_rules(rules_file, rules)
+                    st.success(f"Added {len(to_suppress)} patterns to suppress list in {rules_file}. Re-run audit to see effect.")
+                else:
+                    st.info("No rows selected.")
+
+            # Export
+            out_name = export_findings_xlsx(df.drop(columns=["Not valid? (ignore next time)"]), pdf_file.name, status)
+            st.download_button("Download Excel report", data=open(out_name,"rb").read(), file_name=out_name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        # History log
+        append_history({
+            "timestamp_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+            "user": user_name,
+            "stage": "audit",
+            "client": client,
+            "file": pdf_file.name,
+            "pages": len(pages),
+            "used_ocr": 0,
+            "total_findings": len(all_findings),
+            "outcome": status.upper()
+        })
+
+st.subheader("Audit history (latest 200)")
+st.dataframe(load_history(200), use_container_width=True)
