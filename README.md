@@ -1,23 +1,15 @@
-# AI Design Quality Auditor (pre‑MIMO stable build)
+# AI Design QA — Rules Engine v1
 
-This is a minimal, known-good build that restores the rule learning and PDF audit from earlier working versions.
+**What’s new**
+- Single-audit flow
+- Sidebar prompts for: Client, Project, Site Type, Vendor, Cabinet Location, Radio Location, Quantity of Sectors, Proposed MIMO Config, Site Address
+- Metadata-aware rules engine with simple 'when' filters
+- Rule types: include_text, forbid_together, regex_must, regex_forbid, numeric_range
+- Learning: upload a CSV to mark messages "Not Valid" → suppression
+- Excel export naming: `<original> - PASS|REJECTED - YYYYMMDD.xlsx`
 
-## Run locally
+## Run
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-## Streamlit Cloud
-- Keep **only**: `app.py`, `requirements.txt`, `rules_example.yaml` and `history/` (auto-created).
-- In App settings, "Main module file" = `app.py`.
-- No `packages.txt` is required.
-- Ensure `requirements.txt` contains *LF* line endings (copy the file from this repo to avoid Windows backslashes).
-
-## What’s included
-- Spellcheck with allowlist
-- Required text checks (per client)
-- Simple mutual exclusion (e.g., **Brush** vs **Generator Power**)
-- Feedback CSV loop (`quick_rules_template.csv`) to mark **Valid** / **Not Valid** so the app learns
-- Excel report + pass/fail naming
-
