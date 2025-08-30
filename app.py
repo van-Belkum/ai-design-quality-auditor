@@ -1,12 +1,12 @@
 # app.py
-import os, io, base64, re
+import os, io, re, json, base64
 from pathlib import Path
 from datetime import datetime, timezone
 import streamlit as st
 import pandas as pd
 import yaml
 
-# Optional PDF annotation
+# Optional PDF annotation / text search
 try:
     import fitz  # PyMuPDF
 except Exception:
@@ -21,29 +21,38 @@ RULES_EDIT_PASSWORD = "vanB3lkum21"
 # Paths
 HISTORY_DIR = Path("history")
 EXPORT_DIR = HISTORY_DIR / "exports"
+RECORDS_DIR = HISTORY_DIR / "records"
 HISTORY_CSV = HISTORY_DIR / "audit_history.csv"
 RULES_FILE = Path("rules_example.yaml")
 
-# ------------------------ Helpers ------------------------
+# ------------------------ Utilities ------------------------
 def ensure_dirs():
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    for d in (HISTORY_DIR, EXPORT_DIR, RECORDS_DIR):
+        d.mkdir(parents=True, exist_ok=True)
 
 def now_iso_utc():
     return datetime.now(timezone.utc).isoformat()
 
 def load_rules(path: Path) -> dict:
     if not path.exists():
-        return {}
+        # seed with expected keys
+        data = {
+            "normalizations": {},        # e.g. { "AHEGC": "AHEGG" }
+            "ignore_patterns": [],       # e.g. ["Optional check X", "Minor whitespace .*"]
+        }
+        save_rules(path, data)
+        return data
     with path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        data = yaml.safe_load(f) or {}
+    data.setdefault("normalizations", {})
+    data.setdefault("ignore_patterns", [])
+    return data
 
 def save_rules(path: Path, data: dict):
     with path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
 
 def get_logo_b64() -> str | None:
-    # Order: Settings override -> Secrets LOGO_FILE -> first image in repo root
     override = st.session_state.get("logo_file_override", "").strip()
     cand = override or (st.secrets.get("LOGO_FILE", "").strip() if hasattr(st, "secrets") else "")
     root = Path(".")
@@ -68,9 +77,8 @@ def get_logo_b64() -> str | None:
 def inject_logo_top_left():
     b64 = get_logo_b64()
     if not b64:
-        st.warning("⚠️ Logo file not found. Set **Settings → Logo override** or add a png/jpg/svg to repo root.")
+        st.warning("⚠️ Logo file not found. Set **Settings → Logo override** or add an image to the repo root.")
         return
-    # Heuristic: if base64 begins with "<svg" encoded ("PHN2Zy") treat as svg
     is_svg = b64.startswith("PHN2Zy")
     mime = "image/svg+xml" if is_svg else "image/png"
     st.markdown(
@@ -91,15 +99,14 @@ def inject_logo_top_left():
         unsafe_allow_html=True
     )
 
-def normalize(s: str) -> str:
+def normalize_text(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 def address_matches_title(site_address: str, pdf_title: str) -> bool:
-    # Ignore check if address includes ", 0 ,"
     if ", 0 ," in site_address.replace(",0,", ", 0 ,"):
         return True
-    a = normalize(site_address)
-    t = normalize(pdf_title)
+    a = normalize_text(site_address)
+    t = normalize_text(pdf_title)
     return bool(a) and (a[:12] in t)
 
 def safe_pdf_title(pdf_bytes: bytes) -> str:
@@ -113,6 +120,20 @@ def safe_pdf_title(pdf_bytes: bytes) -> str:
             title = (txt.strip().splitlines() or [""])[0]
         doc.close()
         return title
+    except Exception:
+        return ""
+
+def extract_pdf_text_first_pages(pdf_bytes: bytes, pages: int = 2) -> str:
+    if not fitz:
+        return ""
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pages = min(pages, doc.page_count)
+        chunks = []
+        for i in range(pages):
+            chunks.append(doc.load_page(i).get_text("text") or "")
+        doc.close()
+        return "\n".join(chunks)
     except Exception:
         return ""
 
@@ -149,7 +170,7 @@ def init_history_file():
     ensure_dirs()
     if not HISTORY_CSV.exists():
         cols = [
-            "timestamp_utc","supplier","drawing_type","client","project","site_type","vendor",
+            "run_id","timestamp_utc","supplier","drawing_type","client","project","site_type","vendor",
             "cabinet_location","radio_location","sectors","mimo_config","site_address",
             "original_filename","excel_report","annotated_pdf",
             "findings_total","findings_major","findings_minor","rft_percent","exclude"
@@ -174,6 +195,18 @@ def append_history(row: dict):
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     df.to_csv(HISTORY_CSV, index=False)
 
+def save_run_records(run_id: str, metadata: dict, findings: list[dict]):
+    RECORDS_DIR.mkdir(exist_ok=True, parents=True)
+    with (RECORDS_DIR / f"{run_id}.json").open("w", encoding="utf-8") as f:
+        json.dump({"metadata": metadata, "findings": findings}, f, ensure_ascii=False, indent=2)
+
+def load_run_records(run_id: str) -> dict | None:
+    p = RECORDS_DIR / f"{run_id}.json"
+    if not p.exists():
+        return None
+    with p.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
 # ------------------------ Static Choices ------------------------
 SUPPLIERS = ["— Select —","CEG","CTIL","Emfyser","Innov8","Invict","KTL Team (Internal)","Trylon"]
 DRAWING_TYPES = ["— Select —","General Arrangement","Detailed Design"]
@@ -182,7 +215,6 @@ PROJECTS = ["— Select —","RAN","Power Resilience","East Unwind","Beacon 4"]
 SITE_TYPES = ["— Select —","Greenfield","Rooftop","Streetworks"]
 VENDORS = ["— Select —","Ericsson","Nokia"]
 CABINET_LOCS = ["— Select —","Indoor","Outdoor"]
-# Updated per request:
 RADIO_LOCS = ["— Select —","Low Level","High Level","Unique Coverage","Midway"]
 SECTORS = ["— Select —","1","2","3","4","5","6"]
 
@@ -244,7 +276,6 @@ init_history_file()
 # Login gate
 if "authed" not in st.session_state:
     st.session_state.authed = False
-
 if not st.session_state.authed:
     st.title(APP_TITLE)
     pw = st.text_input("Enter password", type="password")
@@ -257,10 +288,10 @@ if not st.session_state.authed:
     st.stop()
 
 st.sidebar.header("Navigation")
-page = st.sidebar.radio("Go to:", ["Audit","Analytics","Settings"], index=0)
+page = st.sidebar.radio("Go to:", ["Audit","Review & Train","Analytics","Settings"], index=0)
 
 st.title(APP_TITLE)
-st.caption("Professional design QA with audit trail, annotations, analytics, and simple rule updates.")
+st.caption("Audit → Review/Train → Improve rules. YAML updates are password-protected.")
 
 # ------------------------ AUDIT ------------------------
 if page == "Audit":
@@ -285,7 +316,7 @@ if page == "Audit":
         is_power_res = project.lower() == "power resilience"
         st.markdown("##### Proposed MIMO Config{}".format(" (optional for Power Resilience)" if is_power_res else ""))
 
-        same_all = st.checkbox("Use same config for all sectors", value=True, disabled=is_power_res and False)
+        same_all = st.checkbox("Use same config for all sectors", value=True, disabled=False)
         mimo_all = None
         sector_count = int(sectors_choice) if sectors_choice.isdigit() else 0
 
@@ -311,13 +342,12 @@ if page == "Audit":
 
     if clear_btn:
         for k in list(st.session_state.keys()):
-            if k.startswith("mimo_s") or k in ("mimo_all","logo_file_override"):
+            if k.startswith("mimo_s") or k in ("mimo_all",):
                 st.session_state.pop(k, None)
         st.experimental_rerun()
 
     if run_btn:
         errs = []
-        # Required fields
         req = {
             "Supplier": supplier, "Drawing Type": drawing_type, "Client": client, "Project": project,
             "Site Type": site_type, "Proposed Vendor": vendor, "Proposed Cabinet Location": cabinet_location,
@@ -327,7 +357,6 @@ if page == "Audit":
             if (isinstance(val, str) and (val == "" or val.startswith("— "))) or val is None:
                 errs.append(f"{label} is required.")
         if not is_power_res:
-            # validate all MIMO selections
             if sector_count < 1:
                 errs.append("Quantity of Sectors must be 1–6.")
             for i, mv in enumerate(mimo_per_sector or []):
@@ -340,45 +369,62 @@ if page == "Audit":
         else:
             pdf_bytes = pdf_file.read()
             pdf_title = safe_pdf_title(pdf_bytes)
-            addr_ok = address_matches_title(site_address, pdf_title)
-
-            rules = load_rules(RULES_FILE)  # (not used yet—hook for your rule engine)
+            rules = load_rules(RULES_FILE)
 
             findings = []
-            if not addr_ok:
-                findings.append({"severity":"Major","category":"Metadata","message":"Site Address does not appear to match PDF title.","page":1})
 
-            # (Hook) Add future rule checks here using `rules`.
+            # Address vs title
+            if not address_matches_title(site_address, pdf_title):
+                findings.append({"severity":"Major","category":"Metadata","message":"Site Address does not appear to match PDF title.","page":1, "valid": None})
+
+            # Normalization (learning) checks: scan first 2 pages for bad tokens
+            pdf_text = extract_pdf_text_first_pages(pdf_bytes, pages=2)
+            for bad, good in (rules.get("normalizations") or {}).items():
+                if bad and (bad in pdf_text) and (good not in pdf_text):
+                    findings.append({
+                        "severity": "Minor",
+                        "category": "Spelling/Tag",
+                        "message": f"Found '{bad}'. Consider normalizing to '{good}'.",
+                        "page": 1,
+                        "valid": None
+                    })
+
+            # Suppress by ignore_patterns
+            ignore_res = [re.compile(pat) for pat in (rules.get("ignore_patterns") or []) if pat]
+            def suppressed(msg: str) -> bool:
+                return any(rx.search(msg or "") for rx in ignore_res)
+            findings = [f for f in findings if not suppressed(f["message"])]
 
             majors = sum(1 for f in findings if f["severity"].lower()=="major")
             minors = sum(1 for f in findings if f["severity"].lower()=="minor")
-            total = len(findings)
+            total  = len(findings)
             rft = 0 if total>0 else 100
-            df_find = pd.DataFrame(findings or [{"severity":"Info","category":"General","message":"No issues found.","page":1}])
+            df_find = pd.DataFrame(findings or [{"severity":"Info","category":"General","message":"No issues found.","page":1, "valid": True}])
 
-            # Output filenames
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            run_id = ts  # simple run id
             base = Path(pdf_file.name).stem
             report_name = f"{base}_{'Rejected' if total>0 else 'Pass'}_{ts}.xlsx"
             pdf_out_name = f"{base}_annotated_{ts}.pdf"
             excel_path = EXPORT_DIR / report_name
             pdf_out_path = EXPORT_DIR / pdf_out_name
 
-            # MIMO string summary
-            if sector_count <= 1:
-                mimo_string = mimo_per_sector[0] if mimo_per_sector else ""
+            # MIMO string
+            if (int(sector_count or 0)) <= 1:
+                mimo_string = (mimo_per_sector[0] if mimo_per_sector else "") or ""
             else:
                 mimo_string = " | ".join(f"S{i+1}: {m or ''}" for i, m in enumerate(mimo_per_sector))
 
             meta = {
+                "run_id": run_id,
                 "timestamp_utc": now_iso_utc(),
                 "supplier": supplier, "drawing_type": drawing_type, "client": client, "project": project,
                 "site_type": site_type, "vendor": vendor, "cabinet_location": cabinet_location,
-                "radio_location": radio_location, "sectors": sector_count, "mimo_config": mimo_string,
+                "radio_location": radio_location, "sectors": int(sector_count or 0), "mimo_config": mimo_string,
                 "site_address": site_address, "original_filename": pdf_file.name, "pdf_title": pdf_title
             }
 
-            write_excel(df_find, meta, excel_path)
+            write_excel(df_find.drop(columns=["valid"], errors="ignore"), meta, excel_path)
             annotated = annotate_pdf_simple(pdf_bytes, df_find.to_dict("records")) or pdf_bytes
             pdf_out_path.write_bytes(annotated)
 
@@ -387,11 +433,81 @@ if page == "Audit":
             st.download_button("⬇️ Download Annotated PDF", pdf_out_path.read_bytes(), file_name=pdf_out_name, mime="application/pdf")
 
             append_history({
-                **{k: meta[k] for k in ["timestamp_utc","supplier","drawing_type","client","project","site_type","vendor","cabinet_location","radio_location","sectors","mimo_config","site_address","original_filename"]},
+                **{k: meta[k] for k in ["run_id","timestamp_utc","supplier","drawing_type","client","project","site_type","vendor","cabinet_location","radio_location","sectors","mimo_config","site_address","original_filename"]},
                 "excel_report": str(excel_path), "annotated_pdf": str(pdf_out_path),
                 "findings_total": total, "findings_major": majors, "findings_minor": minors, "rft_percent": rft,
                 "exclude": bool(exclude_analytics),
             })
+            save_run_records(run_id, meta, findings)
+
+# ------------------------ REVIEW & TRAIN ------------------------
+elif page == "Review & Train":
+    st.subheader("Validate findings and teach the tool")
+    hist = read_history().sort_values("timestamp_utc", ascending=False)
+    if hist.empty:
+        st.info("No audit runs yet.")
+    else:
+        left, right = st.columns([2,3])
+        run_opt = left.selectbox(
+            "Select a run",
+            options=[(r.run_id, f"{r.timestamp_utc} • {r.supplier} • {r.client} • {r.project}") for _, r in hist.iterrows()],
+            format_func=lambda t: t[1]
+        )
+        if run_opt:
+            run_id = run_opt[0]
+            rec = load_run_records(run_id)
+            if not rec:
+                st.warning("No record file found for this run.")
+            else:
+                meta = rec["metadata"]
+                findings = rec["findings"]
+                st.write(f"**File:** {meta.get('original_filename','')}  |  **Findings:** {len(findings)}")
+
+                if not findings:
+                    st.success("No findings for this run.")
+                else:
+                    st.markdown("##### Label each finding")
+                    rows = []
+                    for i, f in enumerate(findings):
+                        cols = st.columns([4,1,2,2])
+                        cols[0].write(f"**[{f.get('severity','')}] {f.get('category','')}** — {f.get('message','')}")
+                        valid = cols[1].selectbox("Valid?", ["Unreviewed","Valid","Not valid"], index=0, key=f"lab_{run_id}_{i}")
+                        corr = cols[2].text_input("Normalization (bad→good)", key=f"corr_{run_id}_{i}", placeholder="e.g. AHEGC→AHEGG")
+                        ignr = cols[3].text_input("Ignore pattern (regex)", key=f"ign_{run_id}_{i}", placeholder=r"e.g. Optional.*")
+                        rows.append({"valid": valid, "corr": corr, "ign": ignr, "orig": f})
+
+                    apply = st.button("Apply feedback to rules & save labels", type="primary")
+                    if apply:
+                        # Update record with labels
+                        for i, r in enumerate(rows):
+                            findings[i]["valid"] = None if r["valid"]=="Unreviewed" else (r["valid"]=="Valid")
+                        save_run_records(run_id, meta, findings)
+
+                        # Update rules
+                        rules = load_rules(RULES_FILE)
+                        changed = False
+
+                        # Normalizations
+                        for r in rows:
+                            if "→" in r["corr"]:
+                                bad, good = [x.strip() for x in r["corr"].split("→",1)]
+                                if bad and good:
+                                    rules["normalizations"][bad] = good
+                                    changed = True
+
+                        # Ignore patterns
+                        for r in rows:
+                            pat = r["ign"].strip()
+                            if pat:
+                                if pat not in rules["ignore_patterns"]:
+                                    rules["ignore_patterns"].append(pat)
+                                    changed = True
+
+                        if changed:
+                            save_rules(RULES_FILE, rules)
+                            st.success("Rules updated.")
+                        else:
+                            st.info("No rule changes to save.")
 
 # ------------------------ ANALYTICS ------------------------
 elif page == "Analytics":
