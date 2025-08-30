@@ -1,0 +1,11 @@
+version: 1
+allowlist:
+  - AGL
+  - ERS
+mutual_exclusive:
+  - { a: 'Brush', b: 'Generator Power' }
+clients:
+  - name: EE
+    global_includes:
+      - 'ALL DIMENSIONS IN MM'
+      - 'DETAILED DESIGN'
