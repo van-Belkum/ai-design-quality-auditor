@@ -1,10 +1,10 @@
 streamlit
 pandas
 numpy
-PyMuPDF
-openpyxl
-pyyaml
 rapidfuzz
+pyyaml
+openpyxl
+PyMuPDF
 pdf2image
 pytesseract
-opencv-python-headless
+opencv-python
