@@ -1,0 +1,1 @@
+streamlit\npandas\nnumpy\nrapidfuzz\npyyaml\nopenpyxl\nPyMuPDF\npdf2image\npytesseract\n
