@@ -1,9 +1,0 @@
-streamlit
-pandas
-numpy
-rapidfuzz
-pyyaml
-openpyxl
-PyMuPDF
-pdf2image
-pytesseract
