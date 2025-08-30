@@ -1,7 +1,11 @@
-streamlit>=1.37
-pandas>=2.1
-pdfplumber>=0.10
-PyMuPDF>=1.24
-pyspellchecker>=0.8.1
-PyYAML>=6.0.1
+streamlit>=1.32,<2
+pandas>=2.2
+numpy>=2.0
+rapidfuzz>=3.7
+PyYAML>=6.0
 openpyxl>=3.1
+PyMuPDF>=1.24
+pdf2image>=1.16
+pytesseract>=0.3.10
+Pillow>=10.2
+python-dotenv>=1.0
