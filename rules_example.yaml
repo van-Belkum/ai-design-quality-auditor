@@ -1,485 +1,166 @@
 # ============================
 # AI Design Quality Auditor
-# Unified rulebook (extensible)
+# Unified rulebook (safe YAML)
 # ============================
 
 version: 1
 
-# --- NLP & lookups ---
 nlp:
   fuzzy_threshold: 87
   case_insensitive: true
 
 lookups:
   - name: mimo_matrix
-    file: mimo_matrix.csv
+    file: 'mimo_matrix.csv'
   - name: supplier_aliases
-    file: supplier_aliases.csv
+    file: 'supplier_aliases.csv'
   - name: doc_clauses
-    file: doc_clauses.csv
+    file: 'doc_clauses.csv'
 
 tokens:
-  rfts: ["right first time", "rft%", "rft percentage"]
-  title_block: ["title", "title block", "drawing number", "revision"]
+  rfts: ['right first time', 'rft%', 'rft percentage']
+  title_block: ['title', 'title block', 'drawing number', 'revision']
 
-# --- Catalogs used by UI (keep these in sync with dropdowns) ---
 catalogs:
-  clients: ["BTEE","Vodafone","MBNL","H3G","Cornerstone","Cellnex"]
-  projects: ["RAN","Power Resilience","East Unwind","Beacon 4"]
-  site_types: ["Greenfield","Rooftop","Streetworks"]
-  vendors: ["Ericsson","Nokia"]
+  clients: ['BTEE','Vodafone','MBNL','H3G','Cornerstone','Cellnex']
+  projects: ['RAN','Power Resilience','East Unwind','Beacon 4']
+  site_types: ['Greenfield','Rooftop','Streetworks']
+  vendors: ['Ericsson','Nokia']
   suppliers:
-    - "CEG"
-    - "CTIL"
-    - "Emfyser"
-    - "Innov8"
-    - "Invict"
-    - "KTL Team (Internal)"
-    - "Trylon"
-  drawing_types: ["General Arrangement","Detailed Design"]
-  radio_locations: ["Low Level","High Level","Unique Coverage","Midway"]
+    - 'CEG'
+    - 'CTIL'
+    - 'Emfyser'
+    - 'Innov8'
+    - 'Invict'
+    - 'KTL Team (Internal)'
+    - 'Trylon'
+  drawing_types: ['General Arrangement','Detailed Design']
+  radio_locations: ['Low Level','High Level','Unique Coverage','Midway']
   mimo_options:
     - '18 @2x2'
     - '18 @2x2; 26 @4x4'
-    - '18 @2x2; 70\80 @2x2'
+    - '18 @2x2; 70\\80 @2x2'
     - '18 @2x2; 80 @2x2'
-    - '18\21 @2x2'
-    - '18\21 @2x2; 26 @4x4'
-    - '18\21 @2x2; 3500 @32x32'
-    - '18\21 @2x2; 70\80 @2x2'
-    - '18\21 @2x2; 80 @2x2'
-    - '18\21 @4x4'
-    - '18\21 @4x4; 3500 @32x32'
-    - '18\21 @4x4; 70 @2x4'
-    - '18\21 @4x4; 70\80 @2x2'
-    - '18\21 @4x4; 70\80 @2x2; 3500 @32x32'
-    - '18\21 @4x4; 70\80 @2x4'
-    - '18\21 @4x4; 70\80 @2x4; 3500 @32x32'
-    - '18\21 @4x4; 70\80 @2x4; 3500 @8x8'
-    - '18\21@4x4; 70\80 @2x2'
-    - '18\21@4x4; 70\80 @2x4'
-    - '18\21\26 @2x2'
-    - '18\21\26 @2x2; 3500 @32x32'
-    - '18\21\26 @2x2; 3500 @8X8'
-    - '18\21\26 @2x2; 70\80 @2x2'
-    - '18\21\26 @2x2; 70\80 @2x2; 3500 @32x32'
-    - '18\21\26 @2x2; 70\80 @2x2; 3500 @8x8'
-    - '18\21\26 @2x2; 70\80 @2x4; 3500 @32x32'
-    - '18\21\26 @2x2; 80 @2x2'
-    - '18\21\26 @2x2; 80 @2x2; 3500 @8x8'
-    - '18\21\26 @4x4'
-    - '18\21\26 @4x4; 3500 @32x32'
-    - '18\21\26 @4x4; 3500 @8x8'
-    - '18\21\26 @4x4; 70 @2x4; 3500 @8x8'
-    - '18\21\26 @4x4; 70\80 @2x2'
-    - '18\21\26 @4x4; 70\80 @2x2; 3500 @32x32'
-    - '18\21\26 @4x4; 70\80 @2x2; 3500 @8x8'
-    - '18\21\26 @4x4; 70\80 @2x4'
-    - '18\21\26 @4x4; 70\80 @2x4; 3500 @32x32'
-    - '18\21\26 @4x4; 70\80 @2x4; 3500 @8x8'
-    - '18\21\26 @4x4; 80 @2x2'
-    - '18\21\26 @4x4; 80 @2x2; 3500 @32x32'
-    - '18\21\26 @4x4; 80 @2x4'
-    - '18\21\26 @4x4; 80 @2x4; 3500 @8x8'
-    - '18\26 @2x2'
-    - '18\26 @4x4; 21 @2x2; 80 @2x2'
+    - '18\\21 @2x2'
+    - '18\\21 @2x2; 26 @4x4'
+    - '18\\21 @2x2; 3500 @32x32'
+    - '18\\21 @2x2; 70\\80 @2x2'
+    - '18\\21 @2x2; 80 @2x2'
+    - '18\\21 @4x4'
+    - '18\\21 @4x4; 3500 @32x32'
+    - '18\\21 @4x4; 70 @2x4'
+    - '18\\21 @4x4; 70\\80 @2x2'
+    - '18\\21 @4x4; 70\\80 @2x2; 3500 @32x32'
+    - '18\\21 @4x4; 70\\80 @2x4'
+    - '18\\21 @4x4; 70\\80 @2x4; 3500 @32x32'
+    - '18\\21 @4x4; 70\\80 @2x4; 3500 @8x8'
+    - '18\\21@4x4; 70\\80 @2x2'
+    - '18\\21@4x4; 70\\80 @2x4'
+    - '18\\21\\26 @2x2'
+    - '18\\21\\26 @2x2; 3500 @32x32'
+    - '18\\21\\26 @2x2; 3500 @8X8'
+    - '18\\21\\26 @2x2; 70\\80 @2x2'
+    - '18\\21\\26 @2x2; 70\\80 @2x2; 3500 @32x32'
+    - '18\\21\\26 @2x2; 70\\80 @2x2; 3500 @8x8'
+    - '18\\21\\26 @2x2; 70\\80 @2x4; 3500 @32x32'
+    - '18\\21\\26 @2x2; 80 @2x2'
+    - '18\\21\\26 @2x2; 80 @2x2; 3500 @8x8'
+    - '18\\21\\26 @4x4'
+    - '18\\21\\26 @4x4; 3500 @32x32'
+    - '18\\21\\26 @4x4; 3500 @8x8'
+    - '18\\21\\26 @4x4; 70 @2x4; 3500 @8x8'
+    - '18\\21\\26 @4x4; 70\\80 @2x2'
+    - '18\\21\\26 @4x4; 70\\80 @2x2; 3500 @32x32'
+    - '18\\21\\26 @4x4; 70\\80 @2x2; 3500 @8x8'
+    - '18\\21\\26 @4x4; 70\\80 @2x4'
+    - '18\\21\\26 @4x4; 70\\80 @2x4; 3500 @32x32'
+    - '18\\21\\26 @4x4; 70\\80 @2x4; 3500 @8x8'
+    - '18\\21\\26 @4x4; 80 @2x2'
+    - '18\\21\\26 @4x4; 80 @2x2; 3500 @32x32'
+    - '18\\21\\26 @4x4; 80 @2x4'
+    - '18\\21\\26 @4x4; 80 @2x4; 3500 @8x8'
+    - '18\\26 @2x2'
+    - '18\\26 @4x4; 21 @2x2; 80 @2x2'
     - '(blank)'
 
-# ==========================================================
-# Groups & Rules
-# ==========================================================
 groups:
 
-  # ---------- Global basics (always on) ----------
   - id: GLOBAL_BASICS
-    name: Global Basics
+    name: 'Global Basics'
     rules:
-
       - id: TITLE_BLOCK_PRESENT
-        name: Title block must be present
-        severity: major
-        source: { document: "GEN-DWG-STD-001", clause: "3.1" }
+        name: 'Title block must be present'
+        severity: 'major'
+        source:
+          document: 'GEN-DWG-STD-001'
+          clause: '3.1'
         checks:
-          - type: must_contain_any
-            tokens: "@title_block"
-            scope: page_any
+          - type: 'must_contain_any'
+            tokens: '@title_block'
+            scope: 'page_any'
 
       - id: SCALE_SHOWN
-        name: Scale must be shown on first page
-        severity: minor
-        source: { document: "GEN-DWG-STD-001", clause: "3.4" }
+        name: 'Scale must be shown on first page'
+        severity: 'minor'
+        source:
+          document: 'GEN-DWG-STD-001'
+          clause: '3.4'
         checks:
-          - type: must_contain
-            token: "SCALE"
-            scope: first_page
+          - type: 'must_contain'
+            token: 'SCALE'
+            scope: 'first_page'
 
       - id: ADDRESS_MATCHES_TITLE
-        name: Site Address must match drawing title (ignore “, 0 ,”)
-        severity: major
-        source: { document: "GEN-DWG-STD-002", clause: "2.2" }
+        name: 'Site Address must match drawing title (ignore ", 0 ,")'
+        severity: 'major'
+        source:
+          document: 'GEN-DWG-STD-002'
+          clause: '2.2'
         conditions:
           all:
-            - field: site_address
-              not_in: ["", "0", "0, 0"]
+            - field: 'site_address'
+              not_in: ['', '0', '0, 0']
         checks:
-          - type: title_contains_site_address_normalized
-            normalizers: ["strip_commas", "squash_spaces", "upper"]
+          - type: 'title_contains_site_address_normalized'
+            normalizers: ['strip_commas', 'squash_spaces', 'upper']
 
       - id: DENY_AHEGC
-        name: Forbid AHEGC (use AHEGG instead)
-        severity: minor
-        source: { document: "CTIL-CODELIST-2024", clause: "Annex A" }
+        name: 'Forbid AHEGC (use AHEGG instead)'
+        severity: 'minor'
+        source:
+          document: 'CTIL-CODELIST-2024'
+          clause: 'Annex A'
         checks:
-          - type: must_not_contain
-            token: "AHEGC"
+          - type: 'must_not_contain'
+            token: 'AHEGC'
 
-  # ---------- Client-specific shells ----------
-  - id: CLIENT_BTEE
-    name: Client: BTEE
-    rules:
-      - id: _PLACEHOLDER_BTEE_
-        enabled: false
-        name: "Add BTEE-specific rule here"
-        severity: major
-        conditions: { all: [{ field: client, eq: "BTEE" }] }
-        checks:
-          - type: must_contain
-            token: "BTEE EXAMPLE TOKEN"
+  # Shell groups below: enable and edit as needed
 
   - id: CLIENT_VODAFONE
-    name: Client: Vodafone
+    name: 'Client: Vodafone'
     rules:
       - id: _PLACEHOLDER_VODAFONE_
         enabled: false
-        name: "Add Vodafone-specific rule here"
-        severity: major
-        conditions: { all: [{ field: client, eq: "Vodafone" }] }
+        name: 'Add Vodafone-specific rule'
+        severity: 'major'
+        conditions:
+          all:
+            - field: 'client'
+              eq: 'Vodafone'
         checks:
-          - type: must_contain
-            token: "VODAFONE EXAMPLE"
-
-  - id: CLIENT_MBNL
-    name: Client: MBNL
-    rules:
-      - id: _PLACEHOLDER_MBNL_
-        enabled: false
-        name: "Add MBNL-specific rule here"
-        severity: major
-        conditions: { all: [{ field: client, eq: "MBNL" }] }
-        checks:
-          - type: must_not_contain
-            token: "FORBIDDEN"
-
-  - id: CLIENT_H3G
-    name: Client: H3G
-    rules:
-      - id: _PLACEHOLDER_H3G_
-        enabled: false
-        name: "Add H3G-specific rule here"
-        severity: minor
-        conditions: { all: [{ field: client, eq: "H3G" }] }
-        checks:
-          - type: must_contain
-            token: "H3G"
-
-  - id: CLIENT_CORNERSTONE
-    name: Client: Cornerstone
-    rules:
-      - id: _PLACEHOLDER_CORNERSTONE_
-        enabled: false
-        name: "Add Cornerstone-specific rule here"
-        severity: minor
-        conditions: { all: [{ field: client, eq: "Cornerstone" }] }
-        checks:
-          - type: must_contain
-            token: "CTIL"
-
-  - id: CLIENT_CELLNEX
-    name: Client: Cellnex
-    rules:
-      - id: _PLACEHOLDER_CELLNEX_
-        enabled: false
-        name: "Add Cellnex-specific rule here"
-        severity: minor
-        conditions: { all: [{ field: client, eq: "Cellnex" }] }
-        checks:
-          - type: must_contain
-            token: "CELLNEX"
-
-  # ---------- Project-specific shells ----------
-  - id: PROJECT_RAN
-    name: Project: RAN
-    rules:
-      - id: _PLACEHOLDER_RAN_
-        enabled: false
-        name: "Add RAN project rule"
-        severity: major
-        conditions: { all: [{ field: project, eq: "RAN" }] }
-        checks:
-          - type: must_contain
-            token: "RAN"
+          - type: 'must_contain'
+            token: 'VODAFONE'
 
   - id: PROJECT_POWER_RESILIENCE
-    name: Project: Power Resilience
+    name: 'Project: Power Resilience'
     rules:
       - id: MIMO_OPTIONAL_FOR_POWER_RES
-        name: "MIMO config optional for Power Resilience"
-        severity: info
+        name: 'MIMO config optional for Power Resilience'
+        severity: 'info'
         conditions:
           all:
-            - field: project
-              eq: "Power Resilience"
+            - field: 'project'
+              eq: 'Power Resilience'
         checks:
-          - type: suppress_field_required
-            field: mimo_required
-
-  - id: PROJECT_EAST_UNWIND
-    name: Project: East Unwind
-    rules:
-      - id: _PLACEHOLDER_EAST_UNWIND_
-        enabled: false
-        name: "Add East Unwind rule"
-        severity: minor
-        conditions: { all: [{ field: project, eq: "East Unwind" }] }
-        checks:
-          - type: must_contain
-            token: "EAST UNWIND"
-
-  - id: PROJECT_BEACON4
-    name: Project: Beacon 4
-    rules:
-      - id: _PLACEHOLDER_BEACON4_
-        enabled: false
-        name: "Add Beacon 4 rule"
-        severity: minor
-        conditions: { all: [{ field: project, eq: "Beacon 4" }] }
-        checks:
-          - type: must_contain
-            token: "BEACON 4"
-
-  # ---------- Site Type shells ----------
-  - id: SITE_GREENFIELD
-    name: Site Type: Greenfield
-    rules:
-      - id: _PLACEHOLDER_GF_
-        enabled: false
-        name: "Add Greenfield rule"
-        severity: minor
-        conditions: { all: [{ field: site_type, eq: "Greenfield" }] }
-        checks:
-          - type: must_contain
-            token: "GREENFIELD"
-
-  - id: SITE_ROOFTOP
-    name: Site Type: Rooftop
-    rules:
-      - id: _PLACEHOLDER_RT_
-        enabled: false
-        name: "Add Rooftop rule"
-        severity: minor
-        conditions: { all: [{ field: site_type, eq: "Rooftop" }] }
-        checks:
-          - type: must_contain
-            token: "ROOFTOP"
-
-  - id: SITE_STREETWORKS
-    name: Site Type: Streetworks
-    rules:
-      - id: _PLACEHOLDER_SW_
-        enabled: false
-        name: "Add Streetworks rule"
-        severity: minor
-        conditions: { all: [{ field: site_type, eq: "Streetworks" }] }
-        checks:
-          - type: must_contain
-            token: "STREETWORKS"
-
-  # ---------- Vendor shells ----------
-  - id: VENDOR_ERICSSON
-    name: Vendor: Ericsson
-    rules:
-      - id: _PLACEHOLDER_ERICSSON_
-        enabled: false
-        name: "Add Ericsson rule"
-        severity: major
-        conditions: { all: [{ field: proposed_vendor, eq: "Ericsson" }] }
-        checks:
-          - type: must_contain
-            token: "ERICSSON"
-
-  - id: VENDOR_NOKIA
-    name: Vendor: Nokia
-    rules:
-      - id: _PLACEHOLDER_NOKIA_
-        enabled: false
-        name: "Add Nokia rule"
-        severity: major
-        conditions: { all: [{ field: proposed_vendor, eq: "Nokia" }] }
-        checks:
-          - type: must_contain
-            token: "NOKIA"
-
-  # ---------- Supplier shells ----------
-  - id: SUPPLIER_CEG
-    name: Supplier: CEG
-    rules:
-      - id: _PLACEHOLDER_SUPPLIER_CEG_
-        enabled: false
-        name: "Add CEG supplier rule"
-        severity: minor
-        conditions: { all: [{ field: supplier, eq: "CEG" }] }
-        checks: [{ type: noop }]
-
-  - id: SUPPLIER_CTIL
-    name: Supplier: CTIL
-    rules:
-      - id: _PLACEHOLDER_SUPPLIER_CTIL_
-        enabled: false
-        name: "Add CTIL supplier rule"
-        severity: minor
-        conditions: { all: [{ field: supplier, eq: "CTIL" }] }
-        checks: [{ type: noop }]
-
-  - id: SUPPLIER_EMFYSER
-    name: Supplier: Emfyser
-    rules:
-      - id: _PLACEHOLDER_SUPPLIER_EMFYSER_
-        enabled: false
-        name: "Add Emfyser supplier rule"
-        severity: minor
-        conditions: { all: [{ field: supplier, eq: "Emfyser" }] }
-        checks: [{ type: noop }]
-
-  - id: SUPPLIER_INNOV8
-    name: Supplier: Innov8
-    rules:
-      - id: _PLACEHOLDER_SUPPLIER_INNOV8_
-        enabled: false
-        name: "Add Innov8 supplier rule"
-        severity: minor
-        conditions: { all: [{ field: supplier, eq: "Innov8" }] }
-        checks: [{ type: noop }]
-
-  - id: SUPPLIER_INVICT
-    name: Supplier: Invict
-    rules:
-      - id: _PLACEHOLDER_SUPPLIER_INVICT_
-        enabled: false
-        name: "Add Invict supplier rule"
-        severity: minor
-        conditions: { all: [{ field: supplier, eq: "Invict" }] }
-        checks: [{ type: noop }]
-
-  - id: SUPPLIER_KTL_INTERNAL
-    name: Supplier: KTL Team (Internal)
-    rules:
-      - id: _PLACEHOLDER_SUPPLIER_KTL_
-        enabled: false
-        name: "Add KTL Team supplier rule"
-        severity: minor
-        conditions: { all: [{ field: supplier, eq: "KTL Team (Internal)" }] }
-        checks: [{ type: noop }]
-
-  - id: SUPPLIER_TRYLON
-    name: Supplier: Trylon
-    rules:
-      - id: _PLACEHOLDER_SUPPLIER_TRYLON_
-        enabled: false
-        name: "Add Trylon supplier rule"
-        severity: minor
-        conditions: { all: [{ field: supplier, eq: "Trylon" }] }
-        checks: [{ type: noop }]
-
-  # ---------- Drawing type shells ----------
-  - id: DRAWING_GA
-    name: Drawing Type: General Arrangement
-    rules:
-      - id: _PLACEHOLDER_GA_
-        enabled: false
-        name: "Add GA rule"
-        severity: minor
-        conditions: { all: [{ field: drawing_type, eq: "General Arrangement" }] }
-        checks: [{ type: noop }]
-
-  - id: DRAWING_DETAILED
-    name: Drawing Type: Detailed Design
-    rules:
-      - id: _PLACEHOLDER_DETAILED_
-        enabled: false
-        name: "Add Detailed Design rule"
-        severity: minor
-        conditions: { all: [{ field: drawing_type, eq: "Detailed Design" }] }
-        checks: [{ type: noop }]
-
-  # ---------- Radio location shells ----------
-  - id: RADIO_LOW
-    name: Radio Location: Low Level
-    rules:
-      - id: _PLACEHOLDER_RADIO_LOW_
-        enabled: false
-        name: "Add Low Level rule"
-        severity: minor
-        conditions: { all: [{ field: proposed_radio_location, eq: "Low Level" }] }
-        checks: [{ type: noop }]
-
-  - id: RADIO_HIGH
-    name: Radio Location: High Level
-    rules:
-      - id: _PLACEHOLDER_RADIO_HIGH_
-        enabled: false
-        name: "Add High Level rule"
-        severity: minor
-        conditions: { all: [{ field: proposed_radio_location, eq: "High Level" }] }
-        checks: [{ type: noop }]
-
-  - id: RADIO_UNIQUE
-    name: Radio Location: Unique Coverage
-    rules:
-      - id: _PLACEHOLDER_RADIO_UNIQUE_
-        enabled: false
-        name: "Add Unique Coverage rule"
-        severity: minor
-        conditions: { all: [{ field: proposed_radio_location, eq: "Unique Coverage" }] }
-        checks: [{ type: noop }]
-
-  - id: RADIO_MIDWAY
-    name: Radio Location: Midway
-    rules:
-      - id: _PLACEHOLDER_RADIO_MIDWAY_
-        enabled: false
-        name: "Add Midway rule"
-        severity: minor
-        conditions: { all: [{ field: proposed_radio_location, eq: "Midway" }] }
-        checks: [{ type: noop }]
-
-  # ---------- MIMO policy example ----------
-  - id: MIMO_POLICY
-    name: MIMO policy derived from lookups
-    rules:
-      - id: DEFAULT_MIMO_BY_VENDOR
-        name: Default MIMO string must match vendor/sector policy
-        severity: major
-        source: { document: "RAN-MIMO-POL-001", clause: "Table 2" }
-        conditions:
-          all:
-            - field: project
-              in: ["RAN","Beacon 4"]
-            - field: sectors_qty
-              in: [1,2,3,4,5,6]
-            - field: proposed_vendor
-              in: ["Ericsson","Nokia"]
-        checks:
-          - type: campo_equals_lookup
-            compare:
-              field: mimo_s1
-              lookup: mimo_matrix
-              where:
-                vendor: "${proposed_vendor}"
-                sectors_qty: "${sectors_qty}"
-              equals_column: default_mimo
-          - type: copy_if_same_all
-            field_from: mimo_s1
-            fields_to: ["mimo_s2","mimo_s3","mimo_s4","mimo_s5","mimo_s6"]
-            enabled_if:
-              field: mimo_same_all
-              eq: true
+          - type: 'suppress_field_required'
+            field: 'mimo_required'
