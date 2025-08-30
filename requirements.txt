@@ -1,0 +1,11 @@
+streamlit
+pandas
+openpyxl
+numpy
+PyMuPDF
+pdfminer.six
+opencv-python
+pyspellchecker
+rapidfuzz
+pytesseract
+pdf2image
