@@ -1,4 +1,0 @@
-section,rule_key,value,notes
-required_phrases,phrase,ALL DIMENSIONS IN MM,Must appear at least once
-forbidden_pairs,left,Brush,If Brush then no Generator Power
-forbidden_pairs,right,Generator Power,Forbidden with Brush
