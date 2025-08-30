@@ -1,3 +1,3 @@
 # AI Design Quality Auditor
 
-Full Streamlit app.
+Full Streamlit app with fixed deps.
