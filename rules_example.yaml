@@ -1,0 +1,35 @@
+# Example rules pack
+allowlist:
+  - fenceline
+  - hybrid
+  - utilised
+  - flexi
+  - polarium
+  - Kathrein
+  - Mafi
+  - solarium
+
+required_text:
+  - text: "ALL DIMENSIONS IN MM"
+    category: "Checklist"
+  - text: "NORTH"
+    category: "Checklist"
+
+forbidden_pairs:
+  - if_contains: "Brush"
+    must_not_contain: "Generator Power"
+    message: "If 'Brush' present, 'Generator Power' must not be used."
+
+client_overrides:
+  BTEE:
+    allowlist: ["EE", "BT"]
+  Vodafone:
+    allowlist: ["VF"]
+  MBNL:
+    allowlist: ["MBNL"]
+  H3G:
+    allowlist: ["Three","H3G"]
+  Cornerstone:
+    allowlist: ["CST"]
+  Cellnex:
+    allowlist: ["Cellnex"]
