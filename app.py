@@ -281,24 +281,54 @@ def record_history(user: str, stage: str, client: str, results: dict) -> pd.Data
     return df
 
 # ---------------- Learning / Manual QA ----------------
-def learn_from_feedback(fb_df: pd.DataFrame, rules_blob: dict, immediate_disable: bool = True):
+def learn_from_feedback(
+    fb_df: pd.DataFrame,
+    rules_blob: dict,
+    immediate_disable: bool = True,
+    target_client_name: Optional[str] = None,
+):
     """
-    Use a findings CSV labeled with 'Valid'/'Not Valid' to evolve rules:
-      - Spelling + Not Valid -> add the word to allowlist.
-      - Checklist + Not Valid with [RULE_ID] in message -> disable that rule (immediately or after 3 strikes).
+    Learn from a Findings CSV labeled with 'Valid'/'Not Valid'.
+      - Spelling + Not Valid -> add word to allowlist.
+      - Checklist + Not Valid with [RULE_ID] -> disable that page rule.
+      - 'Missing required text: "X"' + Not Valid -> remove X from target client's global_includes.
+      - "Forbidden phrase present: 'X'" + Not Valid -> remove 'X' from target client's forbids.
+    If target_client_name is None, we fall back to the current sidebar client.
     """
-    # pick a column that has 'Valid' in name or values
+
+    # pick a label column
     label_col = None
     for c in fb_df.columns:
         if "valid" in str(c).lower() or fb_df[c].astype(str).str.contains("Valid", case=False, na=False).any():
-            label_col = c; break
+            label_col = c
+            break
     if not label_col:
         st.warning("No 'Valid/Not Valid' column found — nothing learned.")
         return rules_blob
 
     labels = fb_df[label_col].astype(str).str.strip().str.lower()
 
-    # Spelling: allowlist
+    # which client to apply to?
+    if not target_client_name:
+        # try sidebar state; safe default "EE"
+        target_client_name = st.session_state.get("client", "EE")
+    target_client_name = str(target_client_name).upper()
+
+    # Map target(s)
+    rules_blob.setdefault("clients", [])
+    name_to_client = {c.get("name","").upper(): c for c in rules_blob["clients"] if "name" in c}
+
+    def _targets():
+        has_client_col = any(col.lower() == "client" for col in fb_df.columns)
+        if has_client_col:
+            grouping = {}
+            for idx, val in fb_df["client"].fillna("").astype(str).items():
+                name = val.strip().upper() or target_client_name
+                grouping.setdefault(name, []).append(idx)
+            return grouping
+        return {target_client_name: fb_df.index.tolist()}
+
+    # 1) Spelling → allowlist
     mask_spell = (fb_df["kind"].astype(str) == "Spelling") & (labels == "not valid")
     to_allow = set()
     for msg in fb_df.loc[mask_spell, "message"].dropna().astype(str):
@@ -309,18 +339,55 @@ def learn_from_feedback(fb_df: pd.DataFrame, rules_blob: dict, immediate_disable
         rules_blob.setdefault("allowlist", [])
         rules_blob["allowlist"] = sorted(set(w.lower() for w in rules_blob["allowlist"]) | to_allow)
 
-    # Checklist: disable rule by [RULE_ID]
-    mask_chk = (fb_df["kind"].astype(str) == "Checklist") & (labels == "not valid")
-    if mask_chk.any():
-        fb_df = fb_df.copy()
-        fb_df["rule_id"] = fb_df["message"].astype(str).str.extract(r"\[([A-Za-z0-9\-_]+)\]")
-        counts = fb_df.loc[mask_chk, "rule_id"].value_counts()
+    # 2) Checklist with [RULE_ID] → disable page rule
+    mask_chk_rule = (fb_df["kind"].astype(str) == "Checklist") & (labels == "not valid") \
+                    & fb_df["message"].astype(str).str.contains(r"\[[A-Za-z0-9\-_]+\]")
+    if mask_chk_rule.any():
+        df2 = fb_df.loc[mask_chk_rule].copy()
+        df2["rule_id"] = df2["message"].astype(str).str.extract(r"\[([A-Za-z0-9\-_]+)\]")
+        counts = df2["rule_id"].value_counts()
         for rid, n in counts.items():
             if not rid:
                 continue
             if immediate_disable or n >= 3:
                 for client in rules_blob.get("clients", []):
                     client["page_rules"] = [r for r in client.get("page_rules", []) if r.get("id") != rid]
+
+    # 3) Global includes → remove string
+    mask_missing = (fb_df["kind"].astype(str) == "Checklist") & (labels == "not valid") \
+                   & fb_df["message"].astype(str).str.contains(r"Missing required text:\s*'")
+    if mask_missing.any():
+        for client_name, row_idxs in _targets().items():
+            client_pack = name_to_client.get(client_name)
+            if not client_pack:
+                client_pack = {"name": client_name, "global_includes": [], "forbids": [], "page_rules": []}
+                rules_blob["clients"].append(client_pack)
+                name_to_client[client_name] = client_pack
+            gi = client_pack.setdefault("global_includes", [])
+            remove_set = set()
+            for msg in fb_df.loc[row_idxs, "message"].dropna().astype(str):
+                m = re.search(r"Missing required text:\s*'([^']+)'", msg)
+                if m:
+                    remove_set.add(m.group(1))
+            if remove_set:
+                client_pack["global_includes"] = [s for s in gi if s not in remove_set]
+
+    # 4) Client forbids → remove phrase
+    mask_forbid = (fb_df["kind"].astype(str) == "Checklist") & (labels == "not valid") \
+                  & fb_df["message"].astype(str).str.contains(r"Forbidden phrase present:\s*'")
+    if mask_forbid.any():
+        for client_name, row_idxs in _targets().items():
+            client_pack = name_to_client.get(client_name)
+            if not client_pack:
+                continue
+            forb = client_pack.setdefault("forbids", [])
+            remove_set = set()
+            for msg in fb_df.loc[row_idxs, "message"].dropna().astype(str):
+                m = re.search(r"Forbidden phrase present:\s*'([^']+)'", msg)
+                if m:
+                    remove_set.add(m.group(1))
+            if remove_set:
+                client_pack["forbids"] = [f for f in forb if f.get("pattern") not in remove_set]
 
     return rules_blob
 
@@ -374,7 +441,7 @@ def apply_manual_qa(manual_df: pd.DataFrame, rules_blob: dict):
         if rtype in ("require_regex", "forbid_regex"):
             for t in targets:
                 pr_list = t.setdefault("page_rules", [])
-                # upsert a page rule with this id
+                # upsert page rule
                 pr = None
                 for x in pr_list:
                     if x.get("id") == rule_id and x.get("when_page_contains") == wpc:
@@ -391,13 +458,14 @@ def apply_manual_qa(manual_df: pd.DataFrame, rules_blob: dict):
     return rules_blob
 
 # ---------------- UI ----------------
-st.set_page_config(page_title="AI Design QA — Learn v5.1", layout="wide")
-st.title("AI Design Quality Auditor — Learn v5.1")
-st.caption("OCR, PDF markups, Excel, history logging, PASS/REJECTED banner, learning & manual QA.")
+st.set_page_config(page_title="AI Design QA — Learn v5.2", layout="wide")
+st.title("AI Design Quality Auditor — Learn v5.2")
+st.caption("OCR, PDF markups, Excel, history, PASS/REJECTED banner, learning & manual QA (incl. global_includes).")
 
 with st.sidebar:
     st.header("Configuration")
     client = st.selectbox("Client", ["EE","H3G","MBNL","VODAFONE","CUSTOM"], index=0)
+    st.session_state["client"] = client  # used by learner fallback
     rules_file = st.file_uploader("Rules pack (YAML)", type=["yaml","yml"])
 
     st.divider(); st.subheader("Reference data")
@@ -416,6 +484,11 @@ with st.sidebar:
 
     st.divider(); st.subheader("Learn from labeled findings")
     fb_csv = st.file_uploader("Findings CSV (with Valid/Not Valid)", type=["csv"])
+    learning_client = st.selectbox(
+        "Apply learning to client",
+        ["(current sidebar client)", "EE", "H3G", "MBNL", "VODAFONE", "CUSTOM"],
+        index=0
+    )
     immediate_disable = st.checkbox("Disable checklist rules immediately when Not Valid", value=True)
     learn_btn = st.button("Apply learning to rules")
 
@@ -444,7 +517,14 @@ if learn_btn and fb_csv is not None:
         fdf = pd.read_csv(fb_csv)
     except Exception:
         fb_csv.seek(0); fdf = pd.read_excel(fb_csv)
-    rules_blob = learn_from_feedback(fdf, rules_blob, immediate_disable=immediate_disable)
+
+    _target = None if learning_client == "(current sidebar client)" else learning_client
+    rules_blob = learn_from_feedback(
+        fdf, rules_blob,
+        immediate_disable=immediate_disable,
+        target_client_name=_target or client
+    )
+
     import yaml
     buf = io.StringIO()
     yaml.safe_dump(rules_blob, buf, sort_keys=False, allow_unicode=True)
