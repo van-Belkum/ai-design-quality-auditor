@@ -1,29 +1,60 @@
-version: 1
+version: 2
 allowlist:
-  - AGL
-  - ERS
-  - BOB
-  - DCDU
-  - BBU
-  - H3G
-  - MBNL
-  - Ø600
-  - Ø300
-  - kVA
-  - gantry
-mutual_exclusive:
-  - { a: 'Brush', b: 'Generator Power' }
-clients:
-  - name: EE
-    global_includes:
-      - 'ALL DIMENSIONS IN MM'
-      - 'DETAILED DESIGN'
-    forbids:
-      - pattern: 'by others as par'
-        hint: 'Did you mean "by others as part"?'
-    page_rules:
-      - id: EE-TITLE-BLOCK
-        when_page_contains: 'Title:'
-        must_include_regex:
-          - 'Date:\s*\d{2}\.\d{2}\.\d{4}'
-          - 'Purpose of Issue:\s*.+'
+  - utilise
+  - utilised
+  - fenceline
+
+# Simple suppressions are stored in history/suppressions.json at runtime.
+
+checks:
+  # Always present somewhere in the doc
+  - type: include_text
+    id: DIMENSIONS-MM
+    text: "ALL DIMENSIONS IN MM"
+    severity: medium
+
+  # Mutual exclusion (forbidden together)
+  - type: forbid_together
+    id: BRUSH-GEN
+    a: "Brush"
+    b: "Generator Power"
+    severity: high
+
+  # Project-specific required phrase
+  - type: include_text
+    id: BEACON4-MARK
+    text: "BEACON 4"
+    when:
+      project: ["Beacon 4"]
+    severity: low
+
+  # Regex must appear on any page (e.g., Title block date)
+  - type: regex_must
+    id: TITLE-DATE
+    regex: "Date:\s*\d{2}[./-]\d{2}[./-]\d{4}"
+    hint: "Expected a date like 01.09.2025 in title block"
+    severity: medium
+
+  # Regex forbidden anywhere
+  - type: regex_forbid
+    id: TBC-FORBID
+    regex: "\bTBC\b"
+    hint: "TBC not allowed in issued designs"
+    severity: high
+
+  # Numeric constraint: Quantity of sectors must be 1..6
+  - type: numeric_range
+    id: SECTORS-RANGE
+    field: sectors
+    min: 1
+    max: 6
+    severity: high
+
+  # Vendor + site type conditional check
+  - type: include_text
+    id: NOK-INDOOR-LABEL
+    text: "NOKIA INDOOR CABINET"
+    when:
+      vendor: ["Nokia"]
+      site_type: ["Indoor"]  # site_type is Greenfield/Rooftop/Streetworks; demo only
+    severity: low
