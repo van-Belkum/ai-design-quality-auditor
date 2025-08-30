@@ -1,40 +1,202 @@
 # rules_example.yaml
+# Master QA ruleset for AI Design QA
+# Each section below corresponds to Audit metadata fields.
+# You can add, edit, or remove entries. The tool will learn from your updates.
 
-metadata:
-  client:
-    allow: ["BTEE","Vodafone","MBNL","H3G","Cornerstone","Cellnex"]
-  project:
-    allow: ["RAN","Power Resilience","East Unwind","Beacon 4"]
-  site_type:
-    allow: ["Greenfield","Rooftop","Streetworks"]
-  vendor:
-    allow: ["Ericsson","Nokia"]
-  cabinet_loc:
-    allow: ["Indoor","Outdoor"]
-  radio_loc:
-    allow: ["High Level","Low Level","Indoor","Door"]
-  sectors:
-    allow: ["1","2","3","4","5","6"]
-  supplier:
-    allow: ["CEG","CTIL","Emfyser","Innov8","Invict","KTL Team (Internal)","Trylon"]
-  drawing_type:
-    allow: ["General Arrangement","Detailed Design"]
-  # site_address is validated in app logic (filename/title match)
-
+# -------------------------------------------------------------------
+# Generic checklist rules (apply to all audits, across all categories)
+# -------------------------------------------------------------------
 checklist:
-  - name: Drawing must declare units
-    severity: major
-    must_contain:
-      - "ALL DIMENSIONS IN MM"
-
-  - name: Title block present
+  - name: "Title block present"
     severity: major
     must_contain:
       - "TITLE"
-      - "DRAWN BY"
+    reject_if_present: []
 
-  - name: No placeholder text
+  - name: "Scale must be shown"
     severity: minor
+    must_contain:
+      - "SCALE"
+    reject_if_present: []
+
+  - name: "Forbidden placeholder text"
+    severity: major
+    must_contain: []
     reject_if_present:
       - "LOREM IPSUM"
-      - "TBD"
+      - "PLACEHOLDER"
+
+# -------------------------------------------------------------------
+# Client-specific rules
+# -------------------------------------------------------------------
+clients:
+  BTEE:
+    must_contain:
+      - "BT"
+    reject_if_present: []
+  Vodafone:
+    must_contain:
+      - "VODAFONE"
+    reject_if_present: []
+  MBNL:
+    must_contain:
+      - "MBNL"
+    reject_if_present: []
+  H3G:
+    must_contain:
+      - "H3G"
+    reject_if_present: []
+  Cornerstone:
+    must_contain:
+      - "CORNERSTONE"
+    reject_if_present: []
+  Cellnex:
+    must_contain:
+      - "CELLNEX"
+    reject_if_present: []
+
+# -------------------------------------------------------------------
+# Project-specific rules
+# -------------------------------------------------------------------
+projects:
+  RAN:
+    must_contain:
+      - "RADIO ACCESS NETWORK"
+    reject_if_present: []
+  Power Resilience:
+    must_contain:
+      - "GENERATOR"
+      - "BACKUP POWER"
+    reject_if_present: []
+  East Unwind:
+    must_contain: []
+    reject_if_present: []
+  Beacon 4:
+    must_contain: []
+    reject_if_present: []
+
+# -------------------------------------------------------------------
+# Site Type-specific rules
+# -------------------------------------------------------------------
+site_types:
+  Greenfield:
+    must_contain:
+      - "TOWER"
+    reject_if_present: []
+  Rooftop:
+    must_contain:
+      - "ROOF"
+    reject_if_present: []
+  Streetworks:
+    must_contain:
+      - "STREETWORKS"
+    reject_if_present: []
+
+# -------------------------------------------------------------------
+# Vendor-specific rules
+# -------------------------------------------------------------------
+vendors:
+  Ericsson:
+    must_contain:
+      - "ERICSSON"
+    reject_if_present: []
+  Nokia:
+    must_contain:
+      - "NOKIA"
+    reject_if_present: []
+
+# -------------------------------------------------------------------
+# Cabinet Location-specific rules
+# -------------------------------------------------------------------
+cabinet_locations:
+  Indoor:
+    must_contain:
+      - "INDOOR"
+    reject_if_present: []
+  Outdoor:
+    must_contain:
+      - "OUTDOOR"
+    reject_if_present: []
+
+# -------------------------------------------------------------------
+# Radio Location-specific rules
+# -------------------------------------------------------------------
+radio_locations:
+  High Level:
+    must_contain:
+      - "HIGH LEVEL"
+    reject_if_present: []
+  Low Level:
+    must_contain:
+      - "LOW LEVEL"
+    reject_if_present: []
+  Indoor:
+    must_contain:
+      - "INDOOR"
+    reject_if_present: []
+  Door:
+    must_contain:
+      - "DOOR"
+    reject_if_present: []
+
+# -------------------------------------------------------------------
+# Sector count-specific rules
+# -------------------------------------------------------------------
+sectors:
+  "1":
+    must_contain: []
+    reject_if_present: []
+  "2":
+    must_contain: []
+    reject_if_present: []
+  "3":
+    must_contain: []
+    reject_if_present: []
+  "4":
+    must_contain: []
+    reject_if_present: []
+  "5":
+    must_contain: []
+    reject_if_present: []
+  "6":
+    must_contain: []
+    reject_if_present: []
+
+# -------------------------------------------------------------------
+# Supplier-specific rules
+# -------------------------------------------------------------------
+suppliers:
+  CEG:
+    must_contain: []
+    reject_if_present: []
+  CTIL:
+    must_contain: []
+    reject_if_present: []
+  Emfyser:
+    must_contain: []
+    reject_if_present: []
+  Innov8:
+    must_contain: []
+    reject_if_present: []
+  Invict:
+    must_contain: []
+    reject_if_present: []
+  KTL Team (Internal):
+    must_contain: []
+    reject_if_present: []
+  Trylon:
+    must_contain: []
+    reject_if_present: []
+
+# -------------------------------------------------------------------
+# Drawing Type-specific rules
+# -------------------------------------------------------------------
+drawing_types:
+  General Arrangement:
+    must_contain:
+      - "GA"
+    reject_if_present: []
+  Detailed Design:
+    must_contain:
+      - "DD"
+    reject_if_present: []
