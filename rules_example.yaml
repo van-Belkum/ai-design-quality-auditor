@@ -1,61 +1,40 @@
-metadata_rules:
+# rules_example.yaml
+
+metadata:
   client:
-    enabled: true
-    required: true
-    allowed: ["BTEE","Vodafone","MBNL","H3G","Cornerstone","Cellnex"]
+    allow: ["BTEE","Vodafone","MBNL","H3G","Cornerstone","Cellnex"]
   project:
-    enabled: true
-    required: true
-    allowed: ["RAN","Power Resilience","East Unwind","Beacon 4"]
+    allow: ["RAN","Power Resilience","East Unwind","Beacon 4"]
   site_type:
-    enabled: true
-    required: true
-    allowed: ["Greenfield","Rooftop","Streetworks"]
+    allow: ["Greenfield","Rooftop","Streetworks"]
   vendor:
-    enabled: true
-    required: true
-    allowed: ["Ericsson","Nokia"]
-  cabinet_location:
-    enabled: true
-    required: true
-    allowed: ["Indoor","Outdoor"]
-  radio_location:
-    enabled: true
-    required: true
-    allowed: ["High Level","Low Level","Indoor and Door"]
+    allow: ["Ericsson","Nokia"]
+  cabinet_loc:
+    allow: ["Indoor","Outdoor"]
+  radio_loc:
+    allow: ["High Level","Low Level","Indoor","Door"]
   sectors:
-    enabled: true
-    required: true
-    min: 1
-    max: 6
-  mimo_config:
-    enabled: true
-    required_unless_project_is: "Power Resilience"
-    allowed_examples:
-      - "18\\21\\26 @4x4; 70\\80 @2x2"
-  site_address:
-    enabled: true
-    required: true
-
+    allow: ["1","2","3","4","5","6"]
   supplier:
-    enabled: true
-    required: true
-    allowed: ["CEG","CTIL","Emfyser","Innov8","Invict","KTL Team (Internal)","Trylon","Other"]
-
+    allow: ["CEG","CTIL","Emfyser","Innov8","Invict","KTL Team (Internal)","Trylon"]
   drawing_type:
-    enabled: true
-    required: true
-    allowed: ["General Arrangement","Detailed Design"]
+    allow: ["General Arrangement","Detailed Design"]
+  # site_address is validated in app logic (filename/title match)
 
-spelling:
-  allow:
-    - existing
-    - site
-    - antenna
-    - feeder
-    - Ericsson
-    - Nokia
-    - GA
-    - RAN
-    - MBNL
-    - CTIL
+checklist:
+  - name: Drawing must declare units
+    severity: major
+    must_contain:
+      - "ALL DIMENSIONS IN MM"
+
+  - name: Title block present
+    severity: major
+    must_contain:
+      - "TITLE"
+      - "DRAWN BY"
+
+  - name: No placeholder text
+    severity: minor
+    reject_if_present:
+      - "LOREM IPSUM"
+      - "TBD"
