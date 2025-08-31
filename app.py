@@ -3,13 +3,11 @@
 # Tabs: Audit | Analytics | Settings | Training
 # Gate password: Seker123  | Rules password (for YAML editor): vanB3lkum21
 
-import io, os, re, json, base64, textwrap, datetime as dt
-from dataclasses import dataclass, asdict
+import io, os, re, json, base64, datetime as dt
 from typing import List, Dict, Any, Optional, Tuple
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yaml
 
 # PDF handling
@@ -125,7 +123,6 @@ def load_history() -> pd.DataFrame:
     try:
         return pd.read_csv(HISTORY_CSV)
     except Exception:
-        # corrupted row – keep what we can
         return pd.read_csv(HISTORY_CSV, on_bad_lines="skip")
 
 def save_history_row(row: Dict[str, Any]) -> None:
@@ -146,9 +143,7 @@ def save_rules(path: str, data: Dict[str, Any]) -> None:
 def site_address_ok(address: str, pdf_name: str) -> bool:
     if not address.strip():
         return False
-    # If ", 0 ," present, ignore that token
     cleaned = re.sub(r"\s*,\s*0\s*,\s*", ", ", address.strip(), flags=re.I)
-    # crude match: every alpha token from address must appear in pdf title
     title = os.path.splitext(os.path.basename(pdf_name))[0]
     a_tokens = [t for t in re.split(r"[^A-Za-z0-9]+", cleaned) if t]
     title_low = title.lower()
@@ -206,8 +201,6 @@ def extract_text_with_ocr(pdf_bytes: bytes) -> List[str]:
     return text_pages
 
 def keyword_boxes(pdf_bytes: bytes, term: str) -> List[Tuple[int, fitz.Rect]]:
-    """Locate approximate bounding boxes for a term (case-insensitive).
-       Robust to environments where TEXT_IGNORECASE flag may not exist."""
     out = []
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -215,16 +208,14 @@ def keyword_boxes(pdf_bytes: bytes, term: str) -> List[Tuple[int, fitz.Rect]]:
         if not q:
             return out
         for pno, page in enumerate(doc):
-            # safest path: run both default search and a manual scan of words
             try:
-                hits = page.search_for(q)  # may be case-sensitive depending on build
+                hits = page.search_for(q)
                 out += [(pno, r) for r in hits]
             except Exception:
                 pass
-            # fallback manual scan
-            words = page.get_text("words")  # list: x0,y0,x1,y1, word, block, line, word_no
+            words = page.get_text("words")
             for x0,y0,x1,y1,w, *_ in words:
-                if w.lower() == q.lower():
+                if str(w).lower() == q.lower():
                     out.append((pno, fitz.Rect(x0,y0,x1,y1)))
         doc.close()
     except Exception:
@@ -232,7 +223,6 @@ def keyword_boxes(pdf_bytes: bytes, term: str) -> List[Tuple[int, fitz.Rect]]:
     return out
 
 def annotate_pdf(pdf_bytes: bytes, findings: List[Dict[str, Any]]) -> bytes:
-    """Add simple rectangles and sticky notes for each finding."""
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception:
@@ -245,10 +235,9 @@ def annotate_pdf(pdf_bytes: bytes, findings: List[Dict[str, Any]]) -> bytes:
         boxes = []
         if key:
             boxes = keyword_boxes(pdf_bytes, key)
-        if not boxes and page_hint >= 0 and page_hint < len(doc):
-            # fallback: drop a note on the hinted page
+        if not boxes and 0 <= page_hint < len(doc):
             p = doc[page_hint]
-            p.add_text_annot(p.rect.tl + fitz.Point(50, 60), txt)
+            p.add_text_annot(p.rect.tl + fitz.Point(50, 60), txt[:200])
             continue
         for pno, rect in boxes[:5]:
             p = doc[pno]
@@ -256,7 +245,6 @@ def annotate_pdf(pdf_bytes: bytes, findings: List[Dict[str, Any]]) -> bytes:
                 p.add_rect_annot(rect)
                 p.add_text_annot(rect.tl + fitz.Point(0, -8), txt[:200])
             except Exception:
-                # last-resort: just add a note near top-left
                 p.add_text_annot(p.rect.tl + fitz.Point(50, 60), txt[:200])
 
     out = io.BytesIO()
@@ -267,7 +255,6 @@ def annotate_pdf(pdf_bytes: bytes, findings: List[Dict[str, Any]]) -> bytes:
 # ==== Rules + checks ========================================================
 
 def run_checks(pages: List[str], meta: Dict[str, Any], rules: Dict[str, Any], do_spell: bool) -> List[Dict[str, Any]]:
-    """Evaluate simple YAML-driven checks + optional spelling."""
     findings: List[Dict[str, Any]] = []
     text_all = "\n".join(pages)
 
@@ -288,8 +275,6 @@ def run_checks(pages: List[str], meta: Dict[str, Any], rules: Dict[str, Any], do
         sev  = chk.get("severity", "minor")
         must = [m for m in chk.get("must_contain", []) if isinstance(m, str)]
         reject_if = [m for m in chk.get("reject_if_present", []) if isinstance(m, str)]
-        scope = chk.get("scope", "any")  # future: page/sheet
-        matched = None
 
         if must:
             ok = all(m.lower() in text_all.lower() for m in must)
@@ -309,21 +294,29 @@ def run_checks(pages: List[str], meta: Dict[str, Any], rules: Dict[str, Any], do
                     "matched": bad, "page": 1, "category": "rule"
                 })
 
+    # Robust spelling: never crash, use sp.unknown()
     if do_spell and SPELL_OK:
-        # simple spell pass on long words; whitelist common RF tokens
-        wl = set(["ericsson","nokia","mimo","sector","cabinet","outdoor","indoor",
-                  "mbnl","cellnex","cornerstone","vodafone","btee"])
-        sp = SpellChecker()
-        words = re.findall(r"[A-Za-z]{4,}", text_all)
-        miss = [w for w in words if w.lower() not in wl and w.lower() not in sp]
-        for w in sorted(set(miss))[:50]:
-            sug = next(iter(sp.candidates(w)), None)
-            findings.append({
-                "severity": "minor",
-                "rule": "Spelling",
-                "message": f"Possible typo: '{w}'" + (f" → '{sug}'" if sug else ""),
-                "matched": w, "page": 1, "category": "spelling"
-            })
+        try:
+            whitelist = set(["ericsson","nokia","mimo","sector","cabinet","outdoor","indoor",
+                             "mbnl","cellnex","cornerstone","vodafone","btee",
+                             "ga","ran","psu","eltek","polaradium","template"])
+            sp = SpellChecker()
+            tokens = re.findall(r"[A-Za-z]{4,}", text_all)
+            lower_tokens = [t.lower() for t in tokens if t.lower() not in whitelist]
+            miss = sp.unknown(lower_tokens)
+            for w in sorted(list(miss))[:50]:
+                try:
+                    sug = next(iter(sp.candidates(w)), None)
+                except Exception:
+                    sug = None
+                findings.append({
+                    "severity": "minor",
+                    "rule": "Spelling",
+                    "message": f"Possible typo: '{w}'" + (f" → '{sug}'" if sug else ""),
+                    "matched": w, "page": 1, "category": "spelling"
+                })
+        except Exception:
+            pass
 
     return findings
 
@@ -384,14 +377,15 @@ def meta_form() -> Dict[str, Any]:
     st.markdown("### Proposed MIMO Config")
     same_all = st.checkbox("Use S1 for all sectors", value=True)
     mimo1 = st.selectbox("MIMO S1", MIMO_OPTIONS, index=0)
-    # build S2..S6 conditionally
     mimo_map = {"mimo_s1": mimo1}
     for i in range(2, sectors+1):
-        mimo_map[f"mimo_s{i}"] = st.selectbox(f"MIMO S{i}",
-                                              MIMO_OPTIONS,
-                                              index=MIMO_OPTIONS.index(mimo1) if same_all else 0,
-                                              key=f"mimo_{i}",
-                                              disabled=same_all)
+        mimo_map[f"mimo_s{i}"] = st.selectbox(
+            f"MIMO S{i}",
+            MIMO_OPTIONS,
+            index=MIMO_OPTIONS.index(mimo1) if same_all else 0,
+            key=f"mimo_{i}",
+            disabled=same_all
+        )
     for j in range(sectors+1, 7):
         mimo_map[f"mimo_s{j}"] = ""
 
@@ -445,7 +439,6 @@ def audit_tab():
             status = status_from_findings(findings)
             xlsx = make_excel(findings, meta, up.name, status)
 
-        # Save a history row
         stamp = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         excel_name = f"{os.path.splitext(up.name)[0]}_{status}_{stamp}.xlsx"
         pdf_name = f"{os.path.splitext(up.name)[0]}_{status}_{stamp}.pdf"
@@ -471,12 +464,10 @@ def analytics_tab():
         st.info("No history yet.")
         return
 
-    # Keep records not excluded
     df_use = df.copy()
     if "exclude" in df_use.columns:
         df_use = df_use[df_use["exclude"] != True]  # noqa: E712
 
-    # filters
     f1,f2,f3 = st.columns(3)
     sel_client = f1.multiselect("Client", sorted(df_use["client"].dropna().unique().tolist()))
     sel_project = f2.multiselect("Project", sorted(df_use["project"].dropna().unique().tolist()))
@@ -488,7 +479,6 @@ def analytics_tab():
     if sel_supplier: mask &= df_use["supplier"].isin(sel_supplier)
     show = df_use[mask].copy()
 
-    # KPIs
     total = len(show)
     passes = int((show["status"] == "Pass").sum())
     rejects = int((show["status"] == "Rejected").sum())
@@ -498,7 +488,6 @@ def analytics_tab():
     k2.metric("Right-First-Time %", f"{rft:.1f}%")
     k3.metric("Rejected", rejects)
 
-    # table
     cols = [c for c in ["timestamp_utc","supplier","client","project","status","pdf_name","excel_name"] if c in show.columns]
     st.dataframe(show[cols], use_container_width=True, height=320)
 
@@ -506,11 +495,9 @@ def settings_tab():
     st.header("Settings")
     inject_logo_top_left()
     st.write("Place your logo file in repo root (e.g., `logo.png`).")
-    # Rules editor – gated
     pw = st.text_input("Rules password", type="password")
     rules_file = DEFAULT_RULES_FILE
     st.caption(rules_file)
-    rules_text = None
     if os.path.exists(rules_file):
         rules_text = open(rules_file, "r", encoding="utf-8").read()
     else:
@@ -554,7 +541,6 @@ def training_tab():
                     df = pd.read_excel(up)
                     added = False
                     if not df.empty:
-                        # Store a slim snapshot in history for transparency
                         row = {"timestamp_utc": now_utc_iso(), "supplier": "", "drawing_type":"",
                                "client":"", "project":"", "site_type":"", "vendor":"", "cab_loc":"",
                                "radio_loc":"", "sectors":"", "site_address":"",
