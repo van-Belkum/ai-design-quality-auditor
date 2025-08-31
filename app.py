@@ -18,14 +18,14 @@ from pdf2image import convert_from_bytes
 import pytesseract
 
 # Fuzzy/spell
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 from spellchecker import SpellChecker
 
 # -----------------------------
 # CONSTANTS & DEFAULTS
 # -----------------------------
-ENTRY_PASSWORD = "Seker123"
-RULES_PASSWORD = "vanB3lkum21"
+ENTRY_PASSWORD = "Seker123"        # entry gate
+RULES_PASSWORD = "vanB3lkum21"     # settings/rules editor gate
 
 APP_TITLE = "AI Design Quality Auditor"
 
@@ -39,12 +39,12 @@ DEFAULT_SITE_TYPES = ["Greenfield", "Rooftop", "Streetworks"]
 DEFAULT_VENDORS = ["Ericsson", "Nokia"]
 DEFAULT_CABINET_LOCS = ["Indoor", "Outdoor"]
 DEFAULT_RADIO_LOCS = ["Low Level", "High Level", "Unique Coverage", "Midway"]
+# You can overwrite in Settings
 DEFAULT_SUPPLIERS = [
     "TXM", "Cobra", "Mott MacDonald", "SSE", "BT", "Telent", "Daly",
     "DMS", "Naturally Wild", "F&L", "Mono", "Gowrings", "Other"
-]  # You can overwrite in Settings
+]
 
-# A tidy, deduped and sorted MIMO options list (you can extend via Settings)
 DEFAULT_MIMO_OPTIONS = sorted(list({
     "18 @2x2",
     "18 @2x2; 26 @4x4",
@@ -93,7 +93,7 @@ DEFAULT_MIMO_OPTIONS = sorted(list({
     "(blank)"
 }))
 
-DEFAULT_UI_VISIBILITY_HOURS = 24  # how long to show runs in-app by default
+DEFAULT_UI_VISIBILITY_HOURS = 24
 
 # -----------------------------
 # UTILITIES
@@ -108,9 +108,7 @@ def safe_yaml_load(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-            if not isinstance(data, dict):
-                return {}
-            return data
+            return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
@@ -127,19 +125,19 @@ def load_history() -> pd.DataFrame:
     if not os.path.exists(HISTORY_CSV):
         return pd.DataFrame()
     try:
-        df = pd.read_csv(HISTORY_CSV)
+        return pd.read_csv(HISTORY_CSV)
     except Exception:
-        # create a backup and start fresh if corrupt
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        os.rename(HISTORY_CSV, os.path.join(HISTORY_DIR, f"audit_history_corrupt_{ts}.csv"))
+        try:
+            os.rename(HISTORY_CSV, os.path.join(HISTORY_DIR, f"audit_history_corrupt_{ts}.csv"))
+        except Exception:
+            pass
         return pd.DataFrame()
-    return df
 
 def append_history(row: Dict[str, Any]) -> None:
     ensure_dirs()
     df = load_history()
-    new = pd.DataFrame([row])
-    df_out = pd.concat([df, new], ignore_index=True)
+    df_out = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     df_out.to_csv(HISTORY_CSV, index=False)
 
 def b64_logo(logo_path: str) -> Optional[str]:
@@ -158,47 +156,33 @@ def stamp_filename(base: str, status: str) -> str:
     name, ext = os.path.splitext(base)
     return f"{name} - {status.upper()} - {today_stamp()}{ext}"
 
+def normalized_words(s: str) -> List[str]:
+    return re.findall(r"[A-Za-z][A-Za-z\-']+", s)
+
 def naive_text_from_pdf(pdf_bytes: bytes) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """
-    Returns a list of page texts and a list of text spans with bbox for annotation:
-    spans = [{"page": i, "text": "...", "bbox": (x0,y0,x1,y1)}...]
-    """
     spans: List[Dict[str, Any]] = []
     texts: List[str] = []
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         for i, page in enumerate(doc):
             texts.append(page.get_text())
-            # Keep span-level positions for later matching
             for b in page.get_text("blocks"):
-                # each block: (x0, y0, x1, y1, "text", block_no, block_type)
                 if len(b) >= 5 and isinstance(b[4], str):
-                    spans.append({
-                        "page": i,
-                        "text": b[4],
-                        "bbox": (b[0], b[1], b[2], b[3])
-                    })
+                    spans.append({"page": i, "text": b[4], "bbox": (b[0], b[1], b[2], b[3])})
     except Exception:
-        # Fallback via OCR (slower)
         try:
             images = convert_from_bytes(pdf_bytes)
-            for i, im in enumerate(images):
-                t = pytesseract.image_to_string(im)
-                texts.append(t)
-            # No bbox available in OCR fallback
+            for im in images:
+                texts.append(pytesseract.image_to_string(im))
         except Exception:
             texts = []
     return texts, spans
 
 def annotate_pdf(original_bytes: bytes, findings: List[Dict[str, Any]]) -> bytes:
-    """
-    Draw rectangles & notes for findings that have bbox or page, otherwise skip.
-    We try to place a sticky note near matched bbox; if no bbox, we add a page-level note in the margin.
-    """
     try:
         doc = fitz.open(stream=original_bytes, filetype="pdf")
         for f in findings:
-            page_idx = f.get("page_index", 0)
+            page_idx = int(f.get("page_index", 0) or 0)
             if page_idx < 0 or page_idx >= len(doc):
                 continue
             page = doc[page_idx]
@@ -207,25 +191,22 @@ def annotate_pdf(original_bytes: bytes, findings: List[Dict[str, Any]]) -> bytes
             if bbox and isinstance(bbox, (tuple, list)) and len(bbox) == 4:
                 rect = fitz.Rect(*bbox)
                 try:
-                    highlight = page.add_rect_annot(rect)
-                    highlight.set_colors(stroke=(1, 0, 0))
-                    highlight.set_border(width=1)
-                    highlight.update()
+                    annot = page.add_rect_annot(rect)
+                    annot.set_colors(stroke=(1, 0, 0))
+                    annot.set_border(width=1)
+                    annot.update()
                     page.add_text_annot(rect.br, comment)
                 except Exception:
                     page.add_text_annot(page.rect.br, comment)
             else:
                 page.add_text_annot(page.rect.br, comment)
-        pdf_out = doc.tobytes()
+        out = doc.tobytes()
         doc.close()
-        return pdf_out
+        return out
     except Exception:
         return original_bytes
 
 def make_excel(findings: List[Dict[str, Any]], meta: Dict[str, Any], original_name: str, status: str) -> bytes:
-    """
-    Create an .xlsx with Findings + Metadata sheets using openpyxl engine (available via pandas).
-    """
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         df_f = pd.DataFrame(findings) if findings else pd.DataFrame(
@@ -236,30 +217,22 @@ def make_excel(findings: List[Dict[str, Any]], meta: Dict[str, Any], original_na
     buf.seek(0)
     return buf.read()
 
-def normalized_words(s: str) -> List[str]:
-    return re.findall(r"[A-Za-z][A-Za-z\-']+", s)
-
 def spelling_findings(pages: List[str], allow_words: set) -> List[Dict[str, Any]]:
     sp = SpellChecker(distance=1)
     res: List[Dict[str, Any]] = []
     for pi, txt in enumerate(pages):
         for w in normalized_words(txt):
             wl = w.lower()
-            if wl in allow_words:
+            if wl in allow_words or len(wl) <= 2:
                 continue
-            # ignore short tokens and mixed stuff
-            if len(wl) <= 2:
-                continue
-            candidates = set()
+            try:
+                # If already known good, skip
+                if wl in sp:
+                    continue
+            except Exception:
+                pass
             try:
                 candidates = set(sp.candidates(wl))
-            except Exception:
-                # safety guard for rare token bugs
-                candidates = set()
-            if wl in sp:
-                continue
-            suggestion = None
-            try:
                 suggestion = next(iter(candidates), None)
             except Exception:
                 suggestion = None
@@ -275,48 +248,32 @@ def spelling_findings(pages: List[str], allow_words: set) -> List[Dict[str, Any]
     return res
 
 def rule_eval_findings(pages: List[str], meta: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Very lightweight rules engine:
-      - regex rules (with optional severity, must_contain, must_not_contain)
-      - address/title matching rule (reject if mismatch unless contains ', 0 ,')
-    """
     findings: List[Dict[str, Any]] = []
     text_all = "\n".join(pages)
 
-    # 1) Address vs Title check (simple version)
+    # Address vs Title check (ignore if ", 0 ," present)
     site_addr = (meta.get("site_address") or "").strip()
     pdf_title = (meta.get("pdf_title") or "").strip()
-    if site_addr and pdf_title:
-        if ", 0 ," in site_addr:
-            pass  # ignore per your rule
-        else:
-            norm = lambda s: re.sub(r"[^A-Za-z0-9]", "", s).lower()
-            if norm(site_addr) not in norm(pdf_title):
-                findings.append({
-                    "rule_id": "ADDR_TITLE",
-                    "severity": "Major",
-                    "message": "Site Address does not match PDF title.",
-                    "page_index": 0,
-                    "bbox": None,
-                    "evidence": f"title='{pdf_title}' vs site='{site_addr}'",
-                    "validated": None
-                })
+    if site_addr and pdf_title and ", 0 ," not in site_addr:
+        norm = lambda s: re.sub(r"[^A-Za-z0-9]", "", s).lower()
+        if norm(site_addr) not in norm(pdf_title):
+            findings.append({
+                "rule_id": "ADDR_TITLE",
+                "severity": "Major",
+                "message": "Site Address does not match PDF title.",
+                "page_index": 0,
+                "bbox": None,
+                "evidence": f"title='{pdf_title}' vs site='{site_addr}'",
+                "validated": None
+            })
 
-    # 2) Hide MIMO check for Power Resilience handled in UI; we still record metadata.
-    # 3) Regex rules from YAML
+    # YAML regex rules
     yaml_rules = (rules.get("rules") or [])
     for r in yaml_rules:
         try:
-            # Optional filters by metadata (client, project, vendor, site_type, etc.)
-            # If any filter present, enforce match.
             meta_filters = r.get("when", {})
             if meta_filters:
-                miss = False
-                for k, v in meta_filters.items():
-                    if str(meta.get(k, "")).strip() != str(v).strip():
-                        miss = True
-                        break
-                if miss:
+                if any(str(meta.get(k,"")).strip() != str(v).strip() for k, v in meta_filters.items()):
                     continue
 
             pattern = r.get("pattern")
@@ -329,70 +286,50 @@ def rule_eval_findings(pages: List[str], meta: Dict[str, Any], rules: Dict[str, 
             rid = r.get("id", f"RULE_{hashlib.md5(pattern.encode()).hexdigest()[:6]}")
             msg = r.get("message", "Rule check")
 
-            if should_exist:
-                if not matches:
-                    findings.append({
-                        "rule_id": rid,
-                        "severity": severity,
-                        "message": msg if msg else f"Missing required pattern: {pattern}",
-                        "page_index": 0,
-                        "bbox": None,
-                        "evidence": None,
-                        "validated": None
-                    })
-                else:
-                    # If requires also must_contain or must_not_contain
-                    must_contain = r.get("must_contain")
-                    must_not = r.get("must_not_contain")
-                    if must_contain and must_contain.lower() not in text_all.lower():
-                        findings.append({
-                            "rule_id": rid,
-                            "severity": severity,
-                            "message": f"Document missing required phrase: {must_contain}",
-                            "page_index": 0,
-                            "bbox": None,
-                            "evidence": None,
-                            "validated": None
-                        })
-                    if must_not and must_not.lower() in text_all.lower():
-                        findings.append({
-                            "rule_id": rid,
-                            "severity": severity,
-                            "message": f"Document contains forbidden phrase: {must_not}",
-                            "page_index": 0,
-                            "bbox": None,
-                            "evidence": None,
-                            "validated": None
-                        })
-            else:
-                if matches:
-                    findings.append({
-                        "rule_id": rid,
-                        "severity": severity,
-                        "message": msg if msg else f"Forbidden pattern present: {pattern}",
-                        "page_index": 0,
-                        "bbox": None,
-                        "evidence": matches[0].group(0)[:200],
-                        "validated": None
-                    })
+            if should_exist and not matches:
+                findings.append({
+                    "rule_id": rid, "severity": severity, "message": msg,
+                    "page_index": 0, "bbox": None, "evidence": None, "validated": None
+                })
+            if (not should_exist) and matches:
+                findings.append({
+                    "rule_id": rid, "severity": severity,
+                    "message": msg or f"Forbidden pattern: {pattern}",
+                    "page_index": 0, "bbox": None,
+                    "evidence": matches[0].group(0)[:200], "validated": None
+                })
+
+            # optional must_contain / must_not_contain
+            must_contain = r.get("must_contain")
+            if should_exist and must_contain and must_contain.lower() not in text_all.lower():
+                findings.append({
+                    "rule_id": rid, "severity": severity,
+                    "message": f"Missing required phrase: {must_contain}",
+                    "page_index": 0, "bbox": None, "evidence": None, "validated": None
+                })
+            must_not = r.get("must_not_contain")
+            if must_not and must_not.lower() in text_all.lower():
+                findings.append({
+                    "rule_id": rid, "severity": severity,
+                    "message": f"Forbidden phrase present: {must_not}",
+                    "page_index": 0, "bbox": None, "evidence": None, "validated": None
+                })
         except Exception:
             continue
 
-    # 4) Example cross-term rule via config: "if 'Brush' then 'Generator Power' should not be used"
+    # Forbid pairs
     forbid_pairs = (rules.get("forbid_pairs") or [])
     for fp in forbid_pairs:
         a = fp.get("contains")
         not_with = fp.get("not_with")
+        sev = fp.get("severity", "Major")
         if a and not_with:
             if a.lower() in text_all.lower() and not_with.lower() in text_all.lower():
                 findings.append({
-                    "rule_id": "PAIR_FORBID",
-                    "severity": "Major",
+                    "rule_id": fp.get("id","PAIR_FORBID"),
+                    "severity": sev,
                     "message": f"'{a}' must not appear with '{not_with}'.",
-                    "page_index": 0,
-                    "bbox": None,
-                    "evidence": None,
-                    "validated": None
+                    "page_index": 0, "bbox": None, "evidence": None, "validated": None
                 })
 
     return findings
@@ -419,7 +356,6 @@ def gate() -> bool:
     st.title(APP_TITLE)
     if "entry_ok" not in st.session_state:
         st.session_state.entry_ok = False
-
     if not st.session_state.entry_ok:
         with st.form("entry_gate"):
             pw = st.text_input("Enter access password", type="password")
@@ -427,7 +363,7 @@ def gate() -> bool:
         if ok:
             if pw == ENTRY_PASSWORD:
                 st.session_state.entry_ok = True
-                st.experimental_rerun()
+                st.rerun()  # FIX: use st.rerun instead of st.experimental_rerun
             else:
                 st.error("Incorrect password.")
         return False
@@ -505,7 +441,6 @@ def audit_tab(rules_path: str):
         qty_sectors = c8.selectbox("Quantity of Sectors", [1,2,3,4,5,6], index=2)
         do_spell = c9.checkbox("Run spelling check", value=True)
 
-        # Sector MIMO configs (hide for Power Resilience)
         sector_mimos = {}
         same_all = False
         if project != "Power Resilience":
@@ -533,14 +468,11 @@ def audit_tab(rules_path: str):
         st.error("Please upload a PDF.")
         return
 
-    # Pull PDF text & spans
     raw = pdf_file.read()
     pages, spans = naive_text_from_pdf(raw)
 
-    # Allowlist (from rules)
     allow = set([w.lower() for w in (rules.get("allowlist") or [])])
 
-    # Metadata
     meta = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "supplier": supplier,
@@ -559,17 +491,14 @@ def audit_tab(rules_path: str):
 
     findings = run_checks(pages, meta, rules, do_spell, allow)
 
-    # Attempt to attach bbox/page to findings by fuzzy locating evidence text in spans
-    # (best-effort; if not found, annotations will still add a page note)
+    # Try attach bbox/page via fuzzy match
     try:
-        flat = "\n".join(pages).lower()
         for f in findings:
             snippet = (f.get("evidence") or f.get("message") or "")[:80].lower()
             if not snippet or not spans:
                 f.setdefault("page_index", 0)
                 continue
-            # find page with best fuzz ratio on block text
-            best = (-1, None, None)  # score, page, bbox
+            best = (-1, None, None)
             for s in spans:
                 score = fuzz.partial_ratio(snippet, (s.get("text") or "").lower())
                 if score > best[0]:
@@ -585,11 +514,9 @@ def audit_tab(rules_path: str):
 
     status = "Pass" if not any(x.get("severity","").lower()=="major" for x in findings) else "Rejected"
 
-    # Build files
     excel_bytes = make_excel(findings, meta, pdf_file.name, status)
     annotated_bytes = annotate_pdf(raw, findings)
 
-    # Persist both to exports with stamped names
     ensure_dirs()
     stamped_xlsx = stamp_filename(os.path.splitext(pdf_file.name)[0] + ".xlsx", status)
     stamped_pdf = stamp_filename(pdf_file.name.replace(".pdf"," - ANNOTATED.pdf"), status)
@@ -602,7 +529,6 @@ def audit_tab(rules_path: str):
     with open(pdf_path, "wb") as f:
         f.write(annotated_bytes)
 
-    # History row
     hist_row = {
         "timestamp_utc": meta["timestamp_utc"],
         "supplier": supplier,
@@ -631,7 +557,6 @@ def audit_tab(rules_path: str):
                            file_name=stamped_pdf, mime="application/pdf")
         st.caption(f"Saved: {pdf_path}")
 
-    # Show findings table for quick triage
     if findings:
         st.markdown("### Findings")
         st.dataframe(pd.DataFrame(findings), use_container_width=True)
@@ -647,22 +572,15 @@ def training_tab(rules_path: str):
         try:
             df = pd.read_excel(up, sheet_name="Findings")
             st.dataframe(df, use_container_width=True)
-            # Update allowlist/rules from validations
             valid_tokens = set()
-            new_forbid_pairs = []
             for _, r in df.iterrows():
                 val = str(r.get("validated","")).strip().lower()
                 msg = str(r.get("message",""))
                 ev = str(r.get("evidence",""))
                 if val in ("valid","true","yes","y"):
-                    # treat evidence token (if simple) as allow-word
                     for w in normalized_words(ev or msg):
                         if len(w) > 2:
                             valid_tokens.add(w.lower())
-                elif val in ("not valid","false","no","n"):
-                    # user says this is a false positive rejection — remove from allowlist if present
-                    pass
-            # Load and update YAML
             rules = safe_yaml_load(rules_path)
             allow = set([w.lower() for w in (rules.get("allowlist") or [])])
             allow |= valid_tokens
@@ -699,7 +617,7 @@ def analytics_tab():
     if dfh.empty:
         st.info("No runs yet.")
         return
-    # Filters
+
     cols = st.columns(3)
     sup = cols[0].multiselect("Supplier", sorted(dfh["supplier"].dropna().unique().tolist()))
     cli = cols[1].multiselect("Client", sorted(dfh["client"].dropna().unique().tolist()))
@@ -709,10 +627,13 @@ def analytics_tab():
     if sup: df = df[df["supplier"].isin(sup)]
     if cli: df = df[df["client"].isin(cli)]
     if pro: df = df[df["project"].isin(pro)]
+    # Respect exclude flag
+    if "exclude" in df.columns:
+        df = df[(df["exclude"] != True) & (df["exclude"].astype(str).str.lower() != "true")]
 
     st.metric("Total Audits", len(df))
-    if "status" in df.columns:
-        st.metric("Right First Time (%)", round(100* (df["status"].str.lower()=="pass").mean(), 1))
+    if "status" in df.columns and len(df) > 0:
+        st.metric("Right First Time (%)", round(100 * (df["status"].str.lower() == "pass").mean(), 1))
 
     show_cols = ["timestamp_utc","supplier","client","project","status","pdf_name","excel_name"]
     exist_cols = [c for c in show_cols if c in df.columns]
@@ -780,10 +701,8 @@ def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     ensure_dirs()
 
-    # locate rules yaml in working dir; allow user to swap via sidebar
     rules_file = st.sidebar.text_input("Rules YAML path", value="rules_example.yaml")
     if not os.path.exists(rules_file):
-        # create a minimal seed file
         seed = {
             "ui": {
                 "supplier_options": DEFAULT_SUPPLIERS,
@@ -808,7 +727,6 @@ def main():
     tab_audit, tab_train, tab_analytics, tab_settings = st.tabs(
         ["🔍 Audit", "🎓 Training", "📈 Analytics", "⚙️ Settings"]
     )
-
     with tab_audit:
         audit_tab(rules_file)
     with tab_train:
