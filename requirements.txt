@@ -3,8 +3,7 @@ pandas
 numpy
 pyyaml
 PyMuPDF
-pyspellchecker
-pdf2image
-pytesseract
 openpyxl
 xlsxwriter
+pyspellchecker
+xlrd
