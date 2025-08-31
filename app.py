@@ -1,7 +1,6 @@
-# app.py
-# AI Design Quality Auditor (consolidated)
+# app.py — AI Design Quality Auditor (stable build with fixes)
 import io, os, re, json, base64, datetime as dt
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 import streamlit as st
 import yaml
@@ -10,36 +9,40 @@ from spellchecker import SpellChecker
 import fitz  # PyMuPDF
 
 # -----------------------
-# App constants / config
+# Config
 # -----------------------
 APP_TITLE = "AI Design Quality Auditor"
-ENTRY_PASSWORD = "Seker123"            # entry gate
-YAML_ADMIN_PASSWORD = "vanB3lkum21"    # to allow YAML edits in Settings
+ENTRY_PASSWORD = "Seker123"
+YAML_ADMIN_PASSWORD = "vanB3lkum21"
 
 HISTORY_DIR = "history"
 os.makedirs(HISTORY_DIR, exist_ok=True)
 HISTORY_CSV = os.path.join(HISTORY_DIR, "audit_history.csv")
-DEFAULT_UI_VISIBILITY_HOURS = 24 * 14  # keep UI-visible records for 14 days
+DEFAULT_UI_VISIBILITY_HOURS = 24 * 14  # 14 days
 
-# Logo config: user can upload in Settings; or set fixed filename here
-DEFAULT_LOGO = None  # e.g., "88F3AB03-9D27-435B-AE39-7427F9A17FFC.png.png"
+DEFAULT_LOGO = None  # e.g. "88F3...png"
 
-# Metadata choices
+# Canonical dropdowns
 CLIENTS   = ["BTEE","Vodafone","MBNL","H3G","Cornerstone","Cellnex"]
 PROJECTS  = ["RAN","Power Resilience","East Unwind","Beacon 4"]
 SITE_TYPE = ["Greenfield","Rooftop","Streetworks"]
 VENDORS   = ["Ericsson","Nokia"]
 CAB_LOCS  = ["Indoor","Outdoor"]
-RAD_LOCS  = ["Low Level","Midway","High Level","Unique Coverage"]  # fixed per your note
+RAD_LOCS  = ["Low Level","Midway","High Level","Unique Coverage"]
 SECTORS_QTY = [1,2,3,4,5,6]
 
-# Suppliers: kept for analytics filter + per-audit capture, not for rules
+# *** YOUR EXACT SUPPLIER LIST (as requested) ***
 SUPPLIERS = [
-    "BT", "BT RAN", "CCS", "F&L", "MNO A", "MNO B", "MNO C", "Sodexo",
-    "Telent", "Mott", "Nokia SI", "Ericsson SI"  # <— add yours here as needed
+    "CEG",
+    "CTIL",
+    "Emfyser",
+    "Innov8",
+    "Invict",
+    "KTL Team (Internal)",
+    "Trylon",
 ]
 
-# MIMO config list (dedup + naturalish order). You can extend in rules .yaml too.
+# MIMO options (dedup + ordered)
 MIMO_OPTIONS = [
     "18 @2x2",
     "18 @2x2; 26 @4x4",
@@ -86,10 +89,10 @@ MIMO_OPTIONS = [
     "18\\26 @2x2",
     "18\\26 @4x4; 21 @2x2; 80 @2x2",
 ]
-MIMO_OPTIONS = list(dict.fromkeys(MIMO_OPTIONS))  # dedupe keep order
+MIMO_OPTIONS = list(dict.fromkeys(MIMO_OPTIONS))
 
 # -----------------------
-# Utilities
+# Helpers
 # -----------------------
 def b64_of_file(path: str) -> Optional[str]:
     try:
@@ -103,7 +106,6 @@ def gate() -> bool:
     if st.session_state["gate_ok"]:
         return True
     st.title(APP_TITLE)
-    st.caption("Secure Access")
     pw = st.text_input("Enter access password", type="password")
     if st.button("Enter"):
         if pw == ENTRY_PASSWORD:
@@ -116,18 +118,8 @@ def load_rules(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-        if not isinstance(data, dict):
-            st.warning("Rules YAML root must be a mapping; using empty.")
-            return {}
-        return data
-    except yaml.YAMLError as e:
-        st.error(f"YAML error: {e}")
-        return {}
-    except FileNotFoundError:
-        st.warning("rules_example.yaml not found; using defaults")
-        return {}
-    except Exception as e:
-        st.error(f"Failed to load rules: {e}")
+        return data if isinstance(data, dict) else {}
+    except Exception:
         return {}
 
 def save_rules(path: str, data: Dict[str, Any]) -> None:
@@ -139,11 +131,7 @@ def save_rules(path: str, data: Dict[str, Any]) -> None:
 
 def text_by_page(pdf_bytes: bytes) -> List[str]:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = []
-    for i in range(len(doc)):
-        page = doc.load_page(i)
-        pages.append(page.get_text("text"))
-    return pages
+    return [doc.load_page(i).get_text("text") for i in range(len(doc))]
 
 def normalize_words(s: str) -> List[str]:
     return re.findall(r"[A-Za-z][A-Za-z\-']+", s)
@@ -175,41 +163,36 @@ def pair_rules_findings(pages: List[str], pairs: List[Dict[str, Any]]) -> List[D
     finds: List[Dict[str, Any]] = []
     for i, page_txt in enumerate(pages, start=1):
         low = page_txt.lower()
-        for pr in pairs:
+        for pr in pairs or []:
             a = (pr.get("a") or "").lower()
             b = (pr.get("b") or "").lower()
-            mode = pr.get("mode","forbid")  # "require" or "forbid"
+            mode = pr.get("mode","forbid")
             msg = pr.get("message") or ""
-            if not a or not b: 
+            if not a or not b:
                 continue
             if mode == "forbid":
                 if a in low and b in low:
                     finds.append({
-                        "page": i,
-                        "pattern": f"{a} & {b}",
+                        "page": i, "pattern": f"{a} & {b}",
                         "message": msg or f"'{a}' must not appear with '{b}'.",
                         "severity": pr.get("severity","major"),
                         "rule_id": pr.get("id","PAIR_FORBID")
                     })
-            else:  # require: if a appears, b must appear somewhere
+            else:
                 if a in low and b not in low:
                     finds.append({
-                        "page": i,
-                        "pattern": a,
+                        "page": i, "pattern": a,
                         "message": msg or f"'{a}' requires '{b}' also to be present.",
                         "severity": pr.get("severity","major"),
                         "rule_id": pr.get("id","PAIR_REQUIRE")
                     })
     return finds
 
-def metadata_rules_findings(meta: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Checks that only rely on the metadata values (fast)."""
+def metadata_rules_findings(meta: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
-    # Example: Address must match title unless contains ", 0 ,"
     address = (meta.get("site_address") or "").strip()
     title    = (meta.get("pdf_name") or "").strip()
-    ignore_pattern = ", 0 ,"
-    if address and ignore_pattern not in address and title:
+    if address and ", 0 ," not in address and title:
         if address.replace(" ","").lower() not in title.replace(" ","").lower():
             out.append({
                 "page": 1,
@@ -218,9 +201,7 @@ def metadata_rules_findings(meta: Dict[str, Any], rules: Dict[str, Any]) -> List
                 "severity": "major",
                 "rule_id": "ADDR_FILENAME_MATCH"
             })
-    # Hide MIMO if Power Resilience: enforcement already in UI; still guard here:
     if meta.get("project") == "Power Resilience":
-        # If they supplied MIMO anyway, warn
         if any(meta.get(f"mimo_s{i}") for i in range(1,7)):
             out.append({
                 "page": 1,
@@ -232,10 +213,6 @@ def metadata_rules_findings(meta: Dict[str, Any], rules: Dict[str, Any]) -> List
     return out
 
 def annotate_pdf(pdf_bytes: bytes, findings: List[Dict[str, Any]]) -> bytes:
-    """
-    Mark exact matches (when available) + sticky notes with messages.
-    Falls back to a single page note if no match found.
-    """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     for f in findings:
         page_idx = max(0, int((f.get("page") or 1) - 1))
@@ -245,42 +222,34 @@ def annotate_pdf(pdf_bytes: bytes, findings: List[Dict[str, Any]]) -> bytes:
         msg  = f"[{(f.get('severity') or 'minor').upper()}] {f.get('message','Finding')}"
         placed = False
 
-        # 1) use provided bbox first
         bbox = f.get("bbox")
         if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
-            r = fitz.Rect(*bbox)
             try:
-                annot = page.add_rect_annot(r)
-                annot.set_colors(stroke=(1,0,0))
-                annot.set_border(width=1)
-                annot.update()
+                r = fitz.Rect(*bbox)
+                ra = page.add_rect_annot(r)
+                ra.set_colors(stroke=(1,0,0)); ra.set_border(width=1); ra.update()
                 page.add_text_annot(r.br + (3,3), msg)
                 placed = True
             except Exception:
                 placed = False
 
-        # 2) otherwise, search for snippet/pattern
         if not placed:
             token = (f.get("snippet") or f.get("pattern") or "").strip()
             if token:
                 try:
-                    for r in page.search_for(token, quads=False)[:3]:
-                        annot = page.add_rect_annot(r)
-                        annot.set_colors(stroke=(1,0,0))
-                        annot.set_border(width=1)
-                        annot.update()
+                    for r in page.search_for(token)[:3]:
+                        ra = page.add_rect_annot(r)
+                        ra.set_colors(stroke=(1,0,0)); ra.set_border(width=1); ra.update()
                         page.add_text_annot(r.br + (3,3), msg)
                         placed = True
                 except Exception:
                     placed = False
 
-        # 3) final fallback: a sticky near TL
         if not placed:
             try:
                 page.add_text_annot(fitz.Point(36, 36), msg)
             except Exception:
                 pass
-
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
@@ -290,22 +259,19 @@ def make_excel(findings: List[Dict[str, Any]], meta: Dict[str, Any], original_na
     meta_row = {**meta, "status": status, "pdf_name": original_name}
     mem = io.BytesIO()
     with pd.ExcelWriter(mem, engine="openpyxl") as xw:
-        # Findings
+        cols = ["page","rule_id","severity","pattern","message"]
         if not df.empty:
-            df = df[["page","rule_id","severity","pattern","message"]].copy()
+            df = df[[c for c in cols if c in df.columns]]
         else:
-            df = pd.DataFrame(columns=["page","rule_id","severity","pattern","message"])
+            df = pd.DataFrame(columns=cols)
         df.to_excel(xw, index=False, sheet_name="Findings")
-
-        # Metadata
         pd.DataFrame([meta_row]).to_excel(xw, index=False, sheet_name="Metadata")
-
     mem.seek(0)
     return mem.read()
 
 def persist_history(record: Dict[str, Any]) -> None:
-    # normalize timestamp
     record["timestamp_utc"] = dt.datetime.utcnow().isoformat()
+    record["exclude"] = bool(record.get("exclude", False))
     try:
         if os.path.exists(HISTORY_CSV):
             df = pd.read_csv(HISTORY_CSV)
@@ -317,76 +283,52 @@ def persist_history(record: Dict[str, Any]) -> None:
         st.warning(f"Could not write history: {e}")
 
 def load_history() -> pd.DataFrame:
+    cols = ["timestamp_utc","supplier","client","project","status","pdf_name","excel_name","exclude"]
     if not os.path.exists(HISTORY_CSV):
-        return pd.DataFrame(columns=[
-            "timestamp_utc","supplier","client","project","status","pdf_name","excel_name","exclude"
-        ])
+        return pd.DataFrame(columns=cols)
     try:
         df = pd.read_csv(HISTORY_CSV)
+        # Ensure all expected columns exist
+        for c in cols:
+            if c not in df.columns:
+                df[c] = None if c != "exclude" else False
+        # Coerce types
         if "timestamp_utc" in df.columns:
             df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], errors="coerce", utc=True)
-        if "exclude" not in df.columns:
-            df["exclude"] = False
-        return df
+        if "exclude" in df.columns:
+            df["exclude"] = df["exclude"].fillna(False).astype(bool)
+        return df[cols]
     except Exception as e:
         st.warning(f"History read issue: {e}")
-        return pd.DataFrame(columns=[
-            "timestamp_utc","supplier","client","project","status","pdf_name","excel_name","exclude"
-        ])
-
-def filter_history_for_ui(df: pd.DataFrame, hours: int) -> pd.DataFrame:
-    if df.empty or "timestamp_utc" not in df.columns:
-        return df
-    cutoff = pd.Timestamp.utcnow() - pd.Timedelta(hours=hours)
-    try:
-        return df[df["timestamp_utc"] >= cutoff]  # timestamps already UTC
-    except Exception:
-        return df
+        return pd.DataFrame(columns=cols)
 
 def run_checks(pages: List[str], meta: Dict[str, Any], rules: Dict[str, Any], do_spell: bool, allow_words: set) -> List[Dict[str, Any]]:
     findings: List[Dict[str, Any]] = []
 
-    # 1) basic rules from YAML: required / forbidden phrase checks (by page)
-    req = rules.get("required_phrases", []) or []
     for pidx, txt in enumerate(pages, start=1):
         low = txt.lower()
-        for r in req:
-            phrase = (r.get("text") or "").lower()
-            if not phrase:
-                continue
-            if phrase not in low:
+        for r in (rules.get("required_phrases") or []):
+            phrase = (r.get("text") or "").lower().strip()
+            if phrase and phrase not in low:
                 findings.append({
-                    "page": pidx,
-                    "pattern": phrase,
+                    "page": pidx, "pattern": phrase,
                     "message": f"Missing required phrase: {phrase}",
                     "severity": r.get("severity","major"),
                     "rule_id": r.get("id","REQUIRED")
                 })
-
-    forb = rules.get("forbidden_phrases", []) or []
-    for pidx, txt in enumerate(pages, start=1):
-        low = txt.lower()
-        for r in forb:
-            phrase = (r.get("text") or "").lower()
-            if not phrase:
-                continue
-            if phrase in low:
+        for r in (rules.get("forbidden_phrases") or []):
+            phrase = (r.get("text") or "").lower().strip()
+            if phrase and phrase in low:
                 findings.append({
-                    "page": pidx,
-                    "pattern": phrase,
+                    "page": pidx, "pattern": phrase,
                     "message": f"Forbidden phrase found: {phrase}",
                     "severity": r.get("severity","major"),
                     "rule_id": r.get("id","FORBIDDEN")
                 })
 
-    # 2) pairwise rules like "Brush" cannot appear with "Generator Power"
-    pairs = rules.get("pair_rules", []) or []
-    findings.extend(pair_rules_findings(pages, pairs))
+    findings.extend(pair_rules_findings(pages, rules.get("pair_rules") or []))
+    findings.extend(metadata_rules_findings(meta))
 
-    # 3) metadata-only checks (fast)
-    findings.extend(metadata_rules_findings(meta, rules))
-
-    # 4) spelling (optional)
     if do_spell:
         findings.extend(spelling_findings(pages, allow_words))
 
@@ -396,20 +338,20 @@ def run_checks(pages: List[str], meta: Dict[str, Any], rules: Dict[str, Any], do
 # UI helpers
 # -----------------------
 def top_logo():
-    # left aligned, larger
     logo_path = st.session_state.get("logo_path") or DEFAULT_LOGO
     b64 = b64_of_file(logo_path) if logo_path else None
-    if not b64:
-        return
-    st.markdown(
-        f"""
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-            <img src="data:image/png;base64,{b64}" style="height:46px;border-radius:6px;" />
-            <div style="font-weight:600;font-size:18px;">{APP_TITLE}</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    if b64:
+        st.markdown(
+            f"""
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+                <img src="data:image/png;base64,{b64}" style="height:46px;border-radius:6px;" />
+                <div style="font-weight:600;font-size:18px;">{APP_TITLE}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(f"### {APP_TITLE}")
 
 def audit_tab():
     st.subheader("Audit")
@@ -446,69 +388,47 @@ def audit_tab():
         exclude_hist = st.checkbox("Exclude this review from analytics")
         rules_file = st.text_input("Rules file (YAML)", value="rules_example.yaml")
 
-        # Run button
         if st.button("Run Audit", type="primary", use_container_width=True) and up:
             raw = up.read()
             pages = text_by_page(raw)
             rules = load_rules(rules_file)
-
             allow = set([w.lower() for w in (rules.get("allowlist") or [])])
 
             meta = {
-                "supplier": supplier,
-                "client": client,
-                "project": project,
-                "site_type": site_tp,
-                "vendor": vendor,
-                "cabinet_location": cab_loc,
-                "radio_location": rad_loc,
-                "sectors": n_sect,
-                "site_address": address,
+                "supplier": supplier, "client": client, "project": project,
+                "site_type": site_tp, "vendor": vendor, "cabinet_location": cab_loc,
+                "radio_location": rad_loc, "sectors": n_sect, "site_address": address,
                 "pdf_name": up.name,
             }
             meta.update(mimo_vals)
 
             findings = run_checks(pages, meta, rules, do_spell, allow)
-
             status = "Pass" if not any(f.get("severity","minor") in ("major","critical") for f in findings) else "Rejected"
 
-            # Create artifacts and keep them in session (do not clear on download)
             excel_bytes = make_excel(findings, meta, up.name, status)
             pdf_annot = annotate_pdf(raw, findings) if findings else raw
 
             st.session_state["last_audit"] = {
-                "meta": meta,
-                "findings": findings,
-                "status": status,
-                "annot_pdf_bytes": pdf_annot,
-                "excel_bytes": excel_bytes,
+                "meta": meta, "findings": findings, "status": status,
+                "annot_pdf_bytes": pdf_annot, "excel_bytes": excel_bytes,
                 "pdf_name": up.name,
                 "excel_name": f"{os.path.splitext(up.name)[0]} - {status} - {dt.datetime.utcnow().strftime('%Y%m%d')}.xlsx",
                 "exclude": bool(exclude_hist),
             }
 
-            # persist to history
             persist_history({
-                "supplier": supplier,
-                "client": client,
-                "project": project,
-                "status": status,
-                "pdf_name": up.name,
+                "supplier": supplier, "client": client, "project": project,
+                "status": status, "pdf_name": up.name,
                 "excel_name": f"{os.path.splitext(up.name)[0]} - {status}.xlsx",
                 "exclude": bool(exclude_hist),
             })
 
-        # Show last results if available
         last = st.session_state.get("last_audit")
         if last:
             st.success(f"Status: **{last['status']}**")
-            st.write("**Findings**")
             df = pd.DataFrame(last["findings"] or [])
-            if df.empty:
-                st.info("No findings.")
-            else:
-                st.dataframe(df, use_container_width=True, height=260)
-
+            st.dataframe(df if not df.empty else pd.DataFrame({"info":["No findings"]}),
+                         use_container_width=True, height=260)
             c1, c2, c3 = st.columns(3)
             with c1:
                 st.download_button("Download Excel Report",
@@ -523,14 +443,12 @@ def audit_tab():
             with c3:
                 if st.button("Clear last audit"):
                     st.session_state.pop("last_audit", None)
-                    st.experimental_set_query_params()  # light refresh indicator
 
 def training_tab():
     st.subheader("Training (Rapid Learn)")
-    st.caption("Upload a previously downloaded Excel report to mark **Valid / Not Valid** and push to the allowlist or custom rules quickly.")
     rules_file = st.text_input("Rules file to update", value="rules_example.yaml", key="train_rules_file")
-    up = st.file_uploader("Upload Excel exported by this tool", type=["xlsx"], key="train_upl")
-    add_rule_text = st.text_input("Add a single new rule quickly (free text -> forbidden phrase)")
+    up = st.file_uploader("Upload Excel exported by this tool (add a 'valid' column in Findings)", type=["xlsx"], key="train_upl")
+    add_rule_text = st.text_input("Add a single forbidden phrase quickly")
 
     if up and st.button("Ingest Corrections"):
         rules = load_rules(rules_file)
@@ -541,30 +459,28 @@ def training_tab():
             st.error(f"Could not read Excel: {e}")
             return
 
-        # We expect you to have added a column 'valid' with values: Valid / Not Valid.
         if "valid" not in fdf.columns:
             st.info("Add a 'valid' column in the Findings sheet (Valid / Not Valid). No changes applied.")
-        else:
-            allow = set([w.lower() for w in (rules.get("allowlist") or [])])
-            forb = rules.get("forbidden_phrases") or []
-            added_f = 0
-            added_a = 0
-            for _, row in fdf.iterrows():
-                pattern = str(row.get("pattern") or "").strip()
-                valid = str(row.get("valid") or "").strip().lower()
-                if not pattern:
-                    continue
-                if valid == "valid":
-                    if pattern.lower() not in allow:
-                        allow.add(pattern.lower()); added_a += 1
-                elif valid in ("not valid","invalid","reject"):
-                    # push into forbidden list
-                    if not any((d.get("text") or "").lower() == pattern.lower() for d in forb):
-                        forb.append({"id": f"FORBID_{len(forb)+1}", "text": pattern, "severity":"major"}); added_f += 1
-            rules["allowlist"] = sorted(list(allow))
-            rules["forbidden_phrases"] = forb
-            save_rules(rules_file, rules)
-            st.success(f"Updated rules: +{added_f} forbidden, +{added_a} allowlist")
+            return
+
+        allow = set([w.lower() for w in (rules.get("allowlist") or [])])
+        forb = rules.get("forbidden_phrases") or []
+        added_f = 0; added_a = 0
+        for _, row in fdf.iterrows():
+            pattern = str(row.get("pattern") or "").strip()
+            valid = str(row.get("valid") or "").strip().lower()
+            if not pattern:
+                continue
+            if valid == "valid":
+                if pattern.lower() not in allow:
+                    allow.add(pattern.lower()); added_a += 1
+            elif valid in ("not valid","invalid","reject"):
+                if not any((d.get("text") or "").lower() == pattern.lower() for d in forb):
+                    forb.append({"id": f"FORBID_{len(forb)+1}", "text": pattern, "severity":"major"}); added_f += 1
+        rules["allowlist"] = sorted(list(allow))
+        rules["forbidden_phrases"] = forb
+        save_rules(rules_file, rules)
+        st.success(f"Updated rules: +{added_f} forbidden, +{added_a} allowlist")
 
     if add_rule_text and st.button("Add forbidden phrase"):
         rules = load_rules(rules_file)
@@ -583,7 +499,7 @@ def analytics_tab():
     if df.empty:
         st.info("No history yet.")
         return
-    # Filters
+
     col = st.columns(3)
     sel_client = col[0].multiselect("Client", sorted(df["client"].dropna().unique().tolist()))
     sel_project = col[1].multiselect("Project", sorted(df["project"].dropna().unique().tolist()))
@@ -593,11 +509,12 @@ def analytics_tab():
     if sel_client:  show = show[show["client"].isin(sel_client)]
     if sel_project: show = show[show["project"].isin(sel_project)]
     if sel_supplier:show = show[show["supplier"].isin(sel_supplier)]
-    # exclude
-    if "exclude" in show.columns:
-        show = show[~show["exclude"]]
 
-    # Summary
+    # *** FIX: ensure boolean then invert ***
+    if "exclude" in show.columns:
+        mask = ~show["exclude"].fillna(False).astype(bool)
+        show = show[mask]
+
     total = len(show)
     rejected = int((show["status"] == "Rejected").sum()) if "status" in show.columns else 0
     passed = total - rejected
@@ -608,19 +525,17 @@ def analytics_tab():
     c[1].metric("Rejected", rejected)
     c[2].metric("Right First Time %", f"{rft:.1f}%")
 
-    # Table
     cols = [c for c in ["timestamp_utc","supplier","client","project","status","pdf_name","excel_name"] if c in show.columns]
     st.dataframe(show[cols].sort_values("timestamp_utc", ascending=False), use_container_width=True, height=320)
 
 def settings_tab():
     st.subheader("Settings")
-    # yaml edit only with admin password
+    # Logo
     col1, col2 = st.columns([1,1])
     with col1:
         st.caption("Logo")
         logo_up = st.file_uploader("Upload logo (png/jpg/svg)", type=["png","jpg","jpeg","svg"], key="logo_upl")
         if logo_up and st.button("Set as logo"):
-            # Save to a temp file in session
             path = os.path.join(".", f"logo_{int(dt.datetime.utcnow().timestamp())}.png")
             with open(path, "wb") as f:
                 f.write(logo_up.read())
@@ -636,7 +551,6 @@ def settings_tab():
     admin_pw = st.text_input("Admin password", type="password")
     rules_path = st.text_input("Rules file", value="rules_example.yaml", key="settings_rules")
     if admin_pw == YAML_ADMIN_PASSWORD:
-        # live view
         curr = load_rules(rules_path)
         raw = st.text_area("rules_example.yaml", value=yaml.safe_dump(curr, sort_keys=False, allow_unicode=True), height=280)
         if st.button("Save rules"):
@@ -657,9 +571,12 @@ def main():
     if not gate():
         st.stop()
 
-    # header bar with logo
-    top_logo()
-    st.write("")
+    # header with logo
+    logo_path = st.session_state.get("logo_path") or DEFAULT_LOGO
+    if logo_path and b64_of_file(logo_path):
+        top_logo()
+    else:
+        st.markdown(f"### {APP_TITLE}")
 
     tab_a, tab_t, tab_an, tab_s = st.tabs(["🔎 Audit", "🧠 Training", "📊 Analytics", "⚙️ Settings"])
     with tab_a:
