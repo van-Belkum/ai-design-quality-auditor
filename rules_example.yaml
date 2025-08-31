@@ -1,166 +1,49 @@
-# ============================
-# AI Design Quality Auditor
-# Unified rulebook (safe YAML)
-# ============================
+# rules_example.yaml
+# You can edit option lists and rules here (Settings tab lets you save safely).
+lists:
+  clients: [BTEE, Vodafone, MBNL, H3G, Cornerstone, Cellnex]
+  projects: [RAN, Power Resilience, East Unwind, Beacon 4]
+  site_types: [Greenfield, Rooftop, Streetworks]
+  vendors: [Ericsson, Nokia]
+  cabinet_locations: [Indoor, Outdoor]
+  radio_locations: [Low Level, High Level, Unique Coverage, Midway]
+  drawing_types: [General Arrangement, Detailed Design]
+  suppliers: [Supplier A, Supplier B, Supplier C]   # <— edit freely; used for dropdowns & analytics filter
+  sector_qty: [1,2,3,4,5,6]
+  # Keep this list lean here to keep YAML readable; you can also supply /mnt/data/mimo_options.txt
+  mimo_configs:
+    - "18 @2x2"
+    - "18\\21 @2x2"
+    - "18\\21\\26 @4x4"
+    - "18\\21\\26 @4x4; 3500 @32x32"
 
-version: 1
+allowlist:
+  - "pylon"
+  - "sitecode"
+  - "3G"
+  - "5G"
+  - "Polaradium"   # keep brand/spec names you don't want flagged as spelling errors
 
-nlp:
-  fuzzy_threshold: 87
-  case_insensitive: true
+checklist:
+  # Example scoped rule (fires only in Power Resilience + Ericsson + Detailed Design)
+  - name: "Eltek PSU note present (drawing 300)"
+    severity: major
+    scope:
+      project: Power Resilience
+      vendor: Ericsson
+      drawing_type: Detailed Design
+    must_contain:
+      - "IMPORTANT NOTE:"
+      - "Eltek PSU"
+      - "TDEE53201"
+      - "section 3.8.1"
+      - "drawing 300"
+    reject_if_present: []
 
-lookups:
-  - name: mimo_matrix
-    file: 'mimo_matrix.csv'
-  - name: supplier_aliases
-    file: 'supplier_aliases.csv'
-  - name: doc_clauses
-    file: 'doc_clauses.csv'
-
-tokens:
-  rfts: ['right first time', 'rft%', 'rft percentage']
-  title_block: ['title', 'title block', 'drawing number', 'revision']
-
-catalogs:
-  clients: ['BTEE','Vodafone','MBNL','H3G','Cornerstone','Cellnex']
-  projects: ['RAN','Power Resilience','East Unwind','Beacon 4']
-  site_types: ['Greenfield','Rooftop','Streetworks']
-  vendors: ['Ericsson','Nokia']
-  suppliers:
-    - 'CEG'
-    - 'CTIL'
-    - 'Emfyser'
-    - 'Innov8'
-    - 'Invict'
-    - 'KTL Team (Internal)'
-    - 'Trylon'
-  drawing_types: ['General Arrangement','Detailed Design']
-  radio_locations: ['Low Level','High Level','Unique Coverage','Midway']
-  mimo_options:
-    - '18 @2x2'
-    - '18 @2x2; 26 @4x4'
-    - '18 @2x2; 70\\80 @2x2'
-    - '18 @2x2; 80 @2x2'
-    - '18\\21 @2x2'
-    - '18\\21 @2x2; 26 @4x4'
-    - '18\\21 @2x2; 3500 @32x32'
-    - '18\\21 @2x2; 70\\80 @2x2'
-    - '18\\21 @2x2; 80 @2x2'
-    - '18\\21 @4x4'
-    - '18\\21 @4x4; 3500 @32x32'
-    - '18\\21 @4x4; 70 @2x4'
-    - '18\\21 @4x4; 70\\80 @2x2'
-    - '18\\21 @4x4; 70\\80 @2x2; 3500 @32x32'
-    - '18\\21 @4x4; 70\\80 @2x4'
-    - '18\\21 @4x4; 70\\80 @2x4; 3500 @32x32'
-    - '18\\21 @4x4; 70\\80 @2x4; 3500 @8x8'
-    - '18\\21@4x4; 70\\80 @2x2'
-    - '18\\21@4x4; 70\\80 @2x4'
-    - '18\\21\\26 @2x2'
-    - '18\\21\\26 @2x2; 3500 @32x32'
-    - '18\\21\\26 @2x2; 3500 @8X8'
-    - '18\\21\\26 @2x2; 70\\80 @2x2'
-    - '18\\21\\26 @2x2; 70\\80 @2x2; 3500 @32x32'
-    - '18\\21\\26 @2x2; 70\\80 @2x2; 3500 @8x8'
-    - '18\\21\\26 @2x2; 70\\80 @2x4; 3500 @32x32'
-    - '18\\21\\26 @2x2; 80 @2x2'
-    - '18\\21\\26 @2x2; 80 @2x2; 3500 @8x8'
-    - '18\\21\\26 @4x4'
-    - '18\\21\\26 @4x4; 3500 @32x32'
-    - '18\\21\\26 @4x4; 3500 @8x8'
-    - '18\\21\\26 @4x4; 70 @2x4; 3500 @8x8'
-    - '18\\21\\26 @4x4; 70\\80 @2x2'
-    - '18\\21\\26 @4x4; 70\\80 @2x2; 3500 @32x32'
-    - '18\\21\\26 @4x4; 70\\80 @2x2; 3500 @8x8'
-    - '18\\21\\26 @4x4; 70\\80 @2x4'
-    - '18\\21\\26 @4x4; 70\\80 @2x4; 3500 @32x32'
-    - '18\\21\\26 @4x4; 70\\80 @2x4; 3500 @8x8'
-    - '18\\21\\26 @4x4; 80 @2x2'
-    - '18\\21\\26 @4x4; 80 @2x2; 3500 @32x32'
-    - '18\\21\\26 @4x4; 80 @2x4'
-    - '18\\21\\26 @4x4; 80 @2x4; 3500 @8x8'
-    - '18\\26 @2x2'
-    - '18\\26 @4x4; 21 @2x2; 80 @2x2'
-    - '(blank)'
-
-groups:
-
-  - id: GLOBAL_BASICS
-    name: 'Global Basics'
-    rules:
-      - id: TITLE_BLOCK_PRESENT
-        name: 'Title block must be present'
-        severity: 'major'
-        source:
-          document: 'GEN-DWG-STD-001'
-          clause: '3.1'
-        checks:
-          - type: 'must_contain_any'
-            tokens: '@title_block'
-            scope: 'page_any'
-
-      - id: SCALE_SHOWN
-        name: 'Scale must be shown on first page'
-        severity: 'minor'
-        source:
-          document: 'GEN-DWG-STD-001'
-          clause: '3.4'
-        checks:
-          - type: 'must_contain'
-            token: 'SCALE'
-            scope: 'first_page'
-
-      - id: ADDRESS_MATCHES_TITLE
-        name: 'Site Address must match drawing title (ignore ", 0 ,")'
-        severity: 'major'
-        source:
-          document: 'GEN-DWG-STD-002'
-          clause: '2.2'
-        conditions:
-          all:
-            - field: 'site_address'
-              not_in: ['', '0', '0, 0']
-        checks:
-          - type: 'title_contains_site_address_normalized'
-            normalizers: ['strip_commas', 'squash_spaces', 'upper']
-
-      - id: DENY_AHEGC
-        name: 'Forbid AHEGC (use AHEGG instead)'
-        severity: 'minor'
-        source:
-          document: 'CTIL-CODELIST-2024'
-          clause: 'Annex A'
-        checks:
-          - type: 'must_not_contain'
-            token: 'AHEGC'
-
-  # Shell groups below: enable and edit as needed
-
-  - id: CLIENT_VODAFONE
-    name: 'Client: Vodafone'
-    rules:
-      - id: _PLACEHOLDER_VODAFONE_
-        enabled: false
-        name: 'Add Vodafone-specific rule'
-        severity: 'major'
-        conditions:
-          all:
-            - field: 'client'
-              eq: 'Vodafone'
-        checks:
-          - type: 'must_contain'
-            token: 'VODAFONE'
-
-  - id: PROJECT_POWER_RESILIENCE
-    name: 'Project: Power Resilience'
-    rules:
-      - id: MIMO_OPTIONAL_FOR_POWER_RES
-        name: 'MIMO config optional for Power Resilience'
-        severity: 'info'
-        conditions:
-          all:
-            - field: 'project'
-              eq: 'Power Resilience'
-        checks:
-          - type: 'suppress_field_required'
-            field: 'mimo_required'
+  # Example generic rule (always on)
+  - name: "Forbidden pair: Brush with Generator Power"
+    severity: major
+    must_contain: []
+    reject_if_present:
+      - "Brush"
+      - "Generator Power"
