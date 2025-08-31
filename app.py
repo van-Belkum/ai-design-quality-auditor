@@ -1,39 +1,43 @@
-# ----------------------------- AI Design Quality Auditor -----------------------------
-# Full app with precise PDF annotations (PyMuPDF), training, analytics, and YAML editor
-# ------------------------------------------------------------------------------------
-
-import os, io, re, json, zipfile, base64, datetime as dt
-from pathlib import Path
+# app.py
+import os, io, re, json, uuid, base64, textwrap
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Any, Tuple, Optional
 
 import streamlit as st
 import pandas as pd
 import yaml
-from rapidfuzz import process, fuzz
 import fitz  # PyMuPDF
+from rapidfuzz import process, fuzz
 
-# ============================== CONSTANTS & SETUP ====================================
-
+# --------------------------------------------------------------------------------------
+# CONSTANTS / PATHS
+# --------------------------------------------------------------------------------------
 APP_TITLE = "AI Design Quality Auditor"
-REPO_ROOT = Path(__file__).parent
-HISTORY_DIR = REPO_ROOT / "history"
-HISTORY_DIR.mkdir(exist_ok=True)
-HISTORY_CSV = HISTORY_DIR / "audit_history.csv"
+HISTORY_CSV = "history.csv"
+EXPORT_DIR = "exports"
+DEFAULT_RULES_FILE = "rules_example.yaml"
 
-ENTRY_PASSWORD = "Seker123"          # App access
-RULES_EDIT_PASSWORD = "vanB3lkum21"  # Rules editor guard
-RULES_FILE_DEFAULT = "rules_example.yaml"
+ENTRY_PASSWORD = "Seker123"        # Gate to enter app
+ADMIN_PASSWORD = "vanB3lkum21"     # Unlock Settings → Rules editing
 
-SUPPLIERS = ["CEG", "CTIL", "Emfyser", "Innov8", "Invict", "KTL Team (Internal)", "Trylon"]
+# Suppliers (used for metadata + analytics filters; extend anytime)
+DEFAULT_SUPPLIERS = [
+    "WFS", "Circet", "Telent", "AlanDick", "Cellnex", "Cornerstone",
+    "BT", "Vodafone", "MBNL", "H3G", "BTEE"
+]
 
-CLIENTS = ["BTEE", "Vodafone", "MBNL", "H3G", "Cornerstone", "Cellnex"]
-PROJECTS = ["RAN", "Power Resilience", "East Unwind", "Beacon 4"]
-SITE_TYPES = ["Greenfield", "Rooftop", "Streetworks"]
-VENDORS = ["Ericsson", "Nokia"]
-CAB_LOCS = ["Indoor", "Outdoor"]
-RADIO_LOCS = ["Low Level", "High Level", "Unique Coverage", "Midway"]
-DRAWING_TYPES = ["General Arrangement", "Detailed Design"]
+# Clients / Projects / etc. (can be extended in Settings)
+DEFAULT_CLIENTS = ["BTEE", "Vodafone", "MBNL", "H3G", "Cornerstone", "Cellnex"]
+DEFAULT_PROJECTS = ["RAN", "Power Resilience", "East Unwind", "Beacon 4"]
+DEFAULT_SITE_TYPES = ["Greenfield", "Rooftop", "Streetworks"]
+DEFAULT_VENDORS = ["Ericsson", "Nokia"]
+DEFAULT_RADIO_LOCATIONS = ["Low Level", "Midway", "High Level", "Unique Coverage", "Indoor"]
+DEFAULT_CABINET_LOCATIONS = ["Indoor", "Outdoor"]
+DEFAULT_DRAWING_TYPES = ["General Arrangement", "Detailed Design"]
+DEFAULT_SECTOR_QTY = [1, 2, 3, 4, 5, 6]
 
-MIMO_OPTIONS = [
+# Compact, curated MIMO options (you can paste bigger list if needed)
+DEFAULT_MIMO_OPTIONS = sorted(list({
     "18 @2x2",
     "18 @2x2; 26 @4x4",
     "18 @2x2; 70\\80 @2x2",
@@ -44,86 +48,62 @@ MIMO_OPTIONS = [
     "18\\21 @2x2; 70\\80 @2x2",
     "18\\21 @2x2; 80 @2x2",
     "18\\21 @4x4",
-    "18\\21 @4x4; 3500 @32x32",
-    "18\\21 @4x4; 70 @2x4",
     "18\\21 @4x4; 70\\80 @2x2",
-    "18\\21 @4x4; 70\\80 @2x2; 3500 @32x32",
     "18\\21 @4x4; 70\\80 @2x4",
     "18\\21 @4x4; 70\\80 @2x4; 3500 @32x32",
-    "18\\21 @4x4; 70\\80 @2x4; 3500 @8x8",
-    "18\\21@4x4; 70\\80 @2x2",
-    "18\\21@4x4; 70\\80 @2x4",
     "18\\21\\26 @2x2",
-    "18\\21\\26 @2x2; 3500 @32x32",
-    "18\\21\\26 @2x2; 3500 @8X8",
     "18\\21\\26 @2x2; 70\\80 @2x2",
-    "18\\21\\26 @2x2; 70\\80 @2x2; 3500 @32x32",
-    "18\\21\\26 @2x2; 70\\80 @2x2; 3500 @8x8",
-    "18\\21\\26 @2x2; 70\\80 @2x4; 3500 @32x32",
-    "18\\21\\26 @2x2; 80 @2x2",
-    "18\\21\\26 @2x2; 80 @2x2; 3500 @8x8",
     "18\\21\\26 @4x4",
-    "18\\21\\26 @4x4; 3500 @32x32",
-    "18\\21\\26 @4x4; 3500 @8x8",
-    "18\\21\\26 @4x4; 70 @2x4; 3500 @8x8",
-    "18\\21\\26 @4x4; 70\\80 @2x2",
-    "18\\21\\26 @4x4; 70\\80 @2x2; 3500 @32x32",
-    "18\\21\\26 @4x4; 70\\80 @2x2; 3500 @8x8",
     "18\\21\\26 @4x4; 70\\80 @2x4",
     "18\\21\\26 @4x4; 70\\80 @2x4; 3500 @32x32",
     "18\\21\\26 @4x4; 70\\80 @2x4; 3500 @8x8",
-    "18\\21\\26 @4x4; 80 @2x2",
-    "18\\21\\26 @4x4; 80 @2x2; 3500 @32x32",
-    "18\\21\\26 @4x4; 80 @2x4",
-    "18\\21\\26 @4x4; 80 @2x4; 3500 @8x8",
+    "18\\21\\26 @4x4; 3500 @32x32",
+    "18\\21\\26 @4x4; 3500 @8x8",
     "18\\26 @2x2",
     "18\\26 @4x4; 21 @2x2; 80 @2x2",
-    "(blank)",
-]
+    "18\\21 @4x4; 70 @2x4",
+    "18\\21 @4x4; 3500 @32x32",
+}))
 
-ANNOTATION = {
-    "pin_radius": 7.0,
-    "pin_color": (1, 0.35, 0.0),
-    "pin_outline": (1, 1, 1),
-    "callout_color": (1, 0.9, 0.8),
-    "callout_text": (0.1, 0.1, 0.1),
-    "callout_line": (1, 0.35, 0.0),
-    "font_size": 9.5,
-    "margin_box_w": 260,
-    "margin_box_pad": 8,
-    "margin_box_fill": (0.04, 0.04, 0.04),
-    "margin_box_stroke": (0.6, 0.6, 0.6),
-    "footer_text_color": (0.7, 0.7, 0.7),
-}
+DEFAULT_UI_VISIBILITY_HOURS = 24  # How long results are pinned in UI (analytics uses history anyway)
 
-st.set_page_config(page_title=APP_TITLE, layout="wide")
+# --------------------------------------------------------------------------------------
+# UTILS / I/O
+# --------------------------------------------------------------------------------------
+def ensure_dirs():
+    os.makedirs(EXPORT_DIR, exist_ok=True)
 
-# ----------------------------------- UTIL --------------------------------------------
+def read_text_file(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
 
-def logo_header():
-    # Try any of these names in repo root, or use session override
-    cands = [
-        st.session_state.get("logo_file") or "",
-        "logo.png", "logo.jpg", "logo.jpeg", "logo.svg",
-        "88F3AB03-9D27-435B-AE39-7427F9A17FFC.png",
-        "88F3AB03-9D27-435B-AE39-7427F9A17FFC.png.png",
-    ]
-    hit = None
-    for nm in cands:
-        p = REPO_ROOT / nm
-        if nm and p.exists():
-            hit = p
-            break
+def write_text_file(path: str, data: str):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(data)
 
-    c1, c2 = st.columns([0.22, 0.78])
-    if hit:
-        c1.image(str(hit), use_container_width=True)
-    else:
-        c1.markdown("### Seker")
-    c2.markdown(f"## {APP_TITLE}")
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
-def load_yaml_safe(path: Path) -> dict:
-    if not path.exists():
+def b64_of_file(path: str) -> Optional[str]:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception:
+        return None
+
+def uuid_str() -> str:
+    return str(uuid.uuid4())
+
+# --------------------------------------------------------------------------------------
+# RULES LOADING / SAVING
+# --------------------------------------------------------------------------------------
+def safe_yaml_load(path: str) -> dict:
+    if not os.path.exists(path):
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -134,512 +114,771 @@ def load_yaml_safe(path: Path) -> dict:
     except Exception:
         return {}
 
-def save_yaml_safe(path: Path, data: dict):
-    with open(path, "w", encoding="utf-8") as f:
+def safe_yaml_dump(path: str, data: dict):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
+    os.replace(tmp, path)
 
-def now_utc_iso():
-    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+def load_rules(path: str) -> dict:
+    data = safe_yaml_load(path)
+    # Ensure base structure
+    data.setdefault("allowlist", [])     # words that should never be flagged as spelling errors
+    data.setdefault("denylist", [])      # patterns that are always errors
+    data.setdefault("phrase_rules", [])  # list of {id, when, message, severity, patterns: [ {must:any_of/all_of, not:any_of}, scope:"text|title|..."} ]
+    data.setdefault("mappings", {})      # quick key->value corrections (e.g., "AHEGC"->"AHEGG")
+    data.setdefault("metadata_rules", {})# per-metadata rules (client/project/vendor/site_type/…)
+    data.setdefault("address_match_title", True)  # enforces Site Address must appear in title
+    data.setdefault("spelling", {"enabled": True})
+    return data
 
-def parse_ts_col(s):
-    try:
-        return pd.to_datetime(s, utc=True, errors="coerce")
-    except Exception:
-        return pd.NaT
+def save_rules(path: str, data: dict):
+    safe_yaml_dump(path, data)
 
-def ensure_history_headers():
-    if not HISTORY_CSV.exists():
-        pd.DataFrame(columns=[
-            "timestamp_utc","status","client","project","site_type","vendor",
-            "cabinet_location","radio_location","drawing_type","supplier",
-            "qty_sectors","mimo_s1","mimo_s2","mimo_s3","mimo_s4","mimo_s5","mimo_s6",
-            "site_address","file_name","excel_name","pdf_name","zip_name",
-            "exclude"
-        ]).to_csv(HISTORY_CSV, index=False)
+def get_vocab_from_rules(rules: dict) -> List[str]:
+    vocab = set()
+    for w in rules.get("allowlist", []):
+        vocab.add(str(w).strip())
+    # You can extend here with project/client/vendor specific words later
+    return sorted([v for v in vocab if v])
 
+# --------------------------------------------------------------------------------------
+# HISTORY (ROBUST)
+# --------------------------------------------------------------------------------------
 def load_history() -> pd.DataFrame:
-    ensure_history_headers()
+    """Load history CSV safely and normalize schema."""
+    cols = [
+        "timestamp_utc","reviewer","supplier","client","project","site_type",
+        "vendor","radio_location","cabinet_location","sectors_qty",
+        "mimo_s1","mimo_s2","mimo_s3","mimo_s4","mimo_s5","mimo_s6",
+        "site_address","drawing_type","status","pdf_name","excel_name",
+        "annot_pdf_name","exclude","right_first_time","notes","run_id"
+    ]
     try:
-        df = pd.read_csv(HISTORY_CSV, on_bad_lines="skip")
+        if os.path.exists(HISTORY_CSV):
+            try:
+                df = pd.read_csv(HISTORY_CSV, dtype=str)
+            except Exception:
+                df = pd.read_csv(HISTORY_CSV, dtype=str, engine="python", on_bad_lines="skip")
+        else:
+            df = pd.DataFrame(columns=cols)
     except Exception:
-        df = pd.DataFrame()
-    if df.empty:
-        return df
-    # normalize types
-    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
-    if "exclude" not in df.columns:
-        df["exclude"] = False
-    return df
+        df = pd.DataFrame(columns=cols)
 
-def append_history(row: dict):
-    ensure_history_headers()
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+    # Types
+    df["exclude"] = df["exclude"].astype(str).str.lower().isin(["true","1","yes"])
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], errors="coerce", utc=True)
+    df["right_first_time"] = pd.to_numeric(df["right_first_time"], errors="coerce")
+    return df[cols]
+
+def append_history_row(meta: dict, status: str, pdf_name: str, excel_name: str,
+                       annot_pdf_name: str = "", notes: str = "", rft: float | None = None,
+                       run_id: str = ""):
     df = load_history()
+    row = {
+        "timestamp_utc": pd.Timestamp.utcnow(),
+        "reviewer": meta.get("reviewer",""),
+        "supplier": meta.get("supplier",""),
+        "client": meta.get("client",""),
+        "project": meta.get("project",""),
+        "site_type": meta.get("site_type",""),
+        "vendor": meta.get("vendor",""),
+        "radio_location": meta.get("radio_location",""),
+        "cabinet_location": meta.get("cabinet_location",""),
+        "sectors_qty": str(meta.get("sectors_qty","")),
+        "mimo_s1": meta.get("mimo_s1",""),
+        "mimo_s2": meta.get("mimo_s2",""),
+        "mimo_s3": meta.get("mimo_s3",""),
+        "mimo_s4": meta.get("mimo_s4",""),
+        "mimo_s5": meta.get("mimo_s5",""),
+        "mimo_s6": meta.get("mimo_s6",""),
+        "site_address": meta.get("site_address",""),
+        "drawing_type": meta.get("drawing_type",""),
+        "status": status,
+        "pdf_name": pdf_name,
+        "excel_name": excel_name,
+        "annot_pdf_name": annot_pdf_name,
+        "exclude": bool(meta.get("exclude_from_analytics", False)),
+        "right_first_time": rft if rft is not None else "",
+        "notes": notes,
+        "run_id": run_id,
+    }
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    df.to_csv(HISTORY_CSV, index=False)
+    tmp = HISTORY_CSV + ".tmp"
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, HISTORY_CSV)
 
-def safe_file_name(stem: str, suffix: str) -> str:
-    stem = re.sub(r"[^\w\-.]+","_", stem)
-    return f"{stem}{suffix}"
+def safe_select(df: pd.DataFrame, wanted: List[str]) -> pd.DataFrame:
+    have = [c for c in wanted if c in df.columns]
+    for c in wanted:
+        if c not in df.columns:
+            df[c] = ""
+    return df[wanted]
 
-# ---------------------------- PDF EXTRACT & ANNOTATE ---------------------------------
+def filter_history_for_ui(df: pd.DataFrame, hours: int = DEFAULT_UI_VISIBILITY_HOURS) -> pd.DataFrame:
+    cutoff = now_utc() - timedelta(hours=hours)
+    # guard if timestamp is NaT
+    df = df.copy()
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], errors="coerce", utc=True)
+    return df[df["timestamp_utc"].fillna(pd.Timestamp.utcnow()).ge(cutoff)]
 
-def extract_pages_text(pdf_bytes: bytes) -> list[str]:
-    """Return list of page strings using PyMuPDF only."""
+# --------------------------------------------------------------------------------------
+# PDF INGEST / ANNOTATE (PyMuPDF-only)
+# --------------------------------------------------------------------------------------
+def extract_text_and_words(pdf_bytes: bytes) -> Tuple[List[str], List[List[dict]]]:
+    """
+    Returns:
+      pages_text: list of page plain text strings
+      pages_words: per page list of words as dicts: {text, bbox(x0,y0,x1,y1), page}
+    """
+    pages_text = []
+    pages_words = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = []
-    for i in range(doc.page_count):
-        p = doc.load_page(i)
-        pages.append(p.get_text("text"))
+    for pno in range(len(doc)):
+        page = doc[pno]
+        pages_text.append(page.get_text("text"))
+        words = []
+        for w in page.get_text("words"):  # (x0, y0, x1, y1, "text", block_no, line_no, word_no)
+            x0, y0, x1, y1, wtext, *_ = w
+            words.append({"text": wtext, "bbox": (x0, y0, x1, y1), "page": pno+1})
+        pages_words.append(words)
     doc.close()
-    return pages
+    return pages_text, pages_words
 
-def _page_text_blocks(page: fitz.Page):
-    blocks = page.get_text("blocks")
-    out = []
-    for b in blocks:
-        x0,y0,x1,y1,txt = b[0],b[1],b[2],b[3],b[4]
-        if txt and txt.strip():
-            out.append({"bbox": fitz.Rect(x0,y0,x1,y1), "text": txt})
-    return out
-
-def _find_text_bbox(page: fitz.Page, needle: str):
-    if not needle:
-        return None
-    # exact
-    hits = page.search_for(needle, quads=False, flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_IGNORECASE)
-    if hits:
-        return hits[0]
-    # regex relaxed
-    safe = re.escape(needle)
-    patt = re.sub(r"\\\s+", r"\\s+", safe)
-    try:
-        areas = page.search_for(patt, quads=False, hit_max=16, flags=fitz.TEXT_REGEX|fitz.TEXT_IGNORECASE)
-        if areas:
-            return areas[0]
-    except Exception:
-        pass
-    # fuzzy to blocks
-    blocks = _page_text_blocks(page)
-    nrm = re.sub(r"\W+","", needle.lower())
-    best, score = None, 0
-    for blk in blocks:
-        hay = re.sub(r"\W+","", blk["text"].lower())
-        if not hay:
+def annotate_pdf(original_pdf: bytes, findings: List[dict]) -> bytes:
+    """
+    findings: list of dict with keys: page(int), bbox(tuple|None), message(str), severity(str)
+    """
+    doc = fitz.open(stream=original_pdf, filetype="pdf")
+    for f in findings:
+        page_no = f.get("page")
+        if not page_no or page_no < 1 or page_no > len(doc):
             continue
-        overlap = len(set(nrm) & set(hay)) / max(1, len(nrm))
-        if overlap > score:
-            best, score = blk, overlap
-    if best and score > 0.35:
-        return best["bbox"]
-    return None
-
-def _draw_pin(page: fitz.Page, idx: int, rect: fitz.Rect):
-    c = ANNOTATION
-    center = rect.tl + (rect.width/2, rect.height/2)
-    sh = page.new_shape()
-    sh.draw_circle(center, c["pin_radius"])
-    sh.finish(color=c["pin_color"], fill=c["pin_color"])
-    sh.draw_circle(center, c["pin_radius"]+1)
-    sh.finish(width=1, color=c["pin_outline"])
-    sh.commit()
-    page.insert_text(center - (c["pin_radius"]/1.2, c["pin_radius"]/1.3),
-                     str(idx), fontsize=c["font_size"]+1,
-                     color=(1,1,1), fontname="helv", render_mode=3)
-
-def _ensure_margin_box(page: fitz.Page) -> fitz.Rect:
-    c = ANNOTATION
-    r = page.rect
-    box = fitz.Rect(r.width - c["margin_box_w"] + 6, 36, r.width - 6, r.height - 36)
-    page.draw_rect(box, color=c["margin_box_stroke"], width=0.7, fill=c["margin_box_fill"])
-    page.insert_text((box.x0 + c["margin_box_pad"], box.y0 + c["margin_box_pad"]),
-                     "Comments", fontsize=c["font_size"]+1, color=(1,1,1))
-    return box
-
-def _add_comment(page: fitz.Page, box: fitz.Rect, idx: int, text: str, y: float) -> float:
-    c = ANNOTATION
-    start = fitz.Point(box.x0 + c["margin_box_pad"], y)
-    badge = 7
-    page.draw_circle(start + (badge, badge), badge, color=(1,1,1), fill=(1,1,1))
-    page.insert_text(start + (badge-3.5, badge-4),
-                     str(idx), fontsize=c["font_size"], color=(0,0,0))
-    page.insert_textbox(
-        fitz.Rect(start.x + 2*badge + 6, start.y, box.x1 - c["margin_box_pad"], start.y + 60),
-        text, fontsize=c["font_size"], color=c["callout_text"]
-    )
-    return start.y + 50
-
-def annotate_pdf(original_pdf_bytes: bytes, findings: list[dict], meta: dict, status: str) -> bytes:
-    doc = fitz.open(stream=original_pdf_bytes, filetype="pdf")
-    # group by page
-    byp = {}
-    for i,f in enumerate(findings, start=1):
-        p = int(f.get("page", 1))
-        p = max(1, min(doc.page_count, p))
-        byp.setdefault(p, []).append((i,f))
-
-    for pno, items in byp.items():
-        page = doc.load_page(pno-1)
-        box = _ensure_margin_box(page)
-        y = box.y0 + 28
-        for idx, f in items:
-            msg = f.get("message","").strip() or "(no detail)"
-            b = f.get("bbox")
-            rect = fitz.Rect(*b) if (b and len(b)==4) else _find_text_bbox(page, f.get("anchor") or f.get("snippet") or "")
-            if rect is None:
-                rect = fitz.Rect(box.x0 - 40, y, box.x0 - 20, y+20)
-            _draw_pin(page, idx, rect)
-            y = _add_comment(page, box, idx, msg, y)
-        footer = f"Audit: {status} • {meta.get('Client','')} • {meta.get('Project','')} • {meta.get('Site Address','')} • Generated by Seker"
-        page.insert_text((36, page.rect.height - 24), footer, fontsize=8.5, color=ANNOTATION["footer_text_color"])
+        page = doc[page_no-1]
+        bbox = f.get("bbox")
+        msg = f.get("message","")
+        if bbox and isinstance(bbox, (list,tuple)) and len(bbox)==4:
+            rect = fitz.Rect(*bbox)
+            page.add_rect_annot(rect)
+            # Add a callout note nearby
+            note = page.add_note(rect.tl, text=msg)
+            note.set_info(info={"title": f.get("rule_id","Finding")})
+        else:
+            # place a sticky note in the top-left margin
+            note = page.add_note(page.rect.tl + (20, 20), text=msg)
+            note.set_info(info={"title": f.get("rule_id","Finding")})
     out = io.BytesIO()
-    doc.save(out, deflate=True, garbage=3)
+    doc.save(out)
     doc.close()
     return out.getvalue()
 
-# -------------------------------- CHECKS / RULES ------------------------------------
+# --------------------------------------------------------------------------------------
+# SPELLING & GENERIC FINDINGS
+# --------------------------------------------------------------------------------------
+def tokenize(text: str) -> List[str]:
+    return re.findall(r"[A-Za-z][A-Za-z\-']{1,}", text)
 
-def load_rules(path: Path) -> dict:
-    return load_yaml_safe(path)
-
-def apply_rules(pages_text: list[str], meta: dict, rules: dict) -> list[dict]:
-    """
-    Extremely simple rules engine that supports:
-    rules['checklist']: list of {name, severity, must_contain: [str], reject_if_present: [str]}
-    """
+def spelling_checks(pages_text: List[str], rules: dict) -> List[dict]:
     findings = []
-    checklist = rules.get("checklist", []) if isinstance(rules, dict) else []
-    for rule in checklist:
-        name = rule.get("name","Rule")
-        sev = rule.get("severity","minor")
-        must = rule.get("must_contain", []) or []
-        rej = rule.get("reject_if_present", []) or []
+    cfg = rules.get("spelling", {"enabled": True})
+    if not cfg.get("enabled", True):
+        return findings
 
-        for i, txt in enumerate(pages_text, start=1):
-            hit_all = all(s.lower() in txt.lower() for s in must)
-            hit_rej = any(s.lower() in txt.lower() for s in rej)
-            if must and not hit_all:
-                findings.append({"page": i, "message": f"{name}: missing required content {must}", "severity": sev, "anchor": must[0] if must else ""})
-            if rej and hit_rej:
-                findings.append({"page": i, "message": f"{name}: forbidden content present {list(set([s for s in rej if s.lower() in txt.lower()]))}", "severity": sev, "anchor": list(set([s for s in rej if s]))[0]})
+    allow = set([w.lower() for w in rules.get("allowlist", [])])
+    # build a vocabulary from allowlist (used for suggestions)
+    vocab = get_vocab_from_rules(rules)
+    vocab_lower = [v.lower() for v in vocab]
+
+    # very light heuristic: flag words with digits+letters mixed or very long sequences
+    for pidx, t in enumerate(pages_text, start=1):
+        tokens = tokenize(t)
+        for w in tokens:
+            wl = w.lower()
+            # skip if in allow
+            if wl in allow:
+                continue
+            # skip if typical unit-like tokens, small words, etc.
+            if len(wl) <= 2:
+                continue
+            if re.search(r"\d", wl):
+                continue
+            # basic suggestion from vocab if present
+            suggestion = None
+            if vocab_lower:
+                m = process.extractOne(wl, vocab_lower, scorer=fuzz.WRatio)
+                if m and m[1] >= 92:
+                    suggestion = vocab[vocab_lower.index(m[0])]
+            findings.append({
+                "page": pidx,
+                "bbox": None,  # we annotate generic notes unless mapped via word boxes (later)
+                "rule_id": "SPELLING",
+                "message": f"Possible spelling issue: '{w}'" + (f" → '{suggestion}'" if suggestion else ""),
+                "severity": "Minor",
+                "category": "Spelling",
+            })
     return findings
 
-def spelling_checks(pages_text: list[str], allow: set[str]) -> list[dict]:
-    """
-    Very light spelling-ish: finds tokens that look like 5+ letters not in allow-list
-    and tries a suggestion via fuzzy matching within the allow-list.
-    """
+def apply_mappings(text: str, rules: dict) -> List[dict]:
+    """Mappings like AHEGC -> AHEGG flagged when found."""
     findings = []
-    words = set()
-    for t in pages_text:
-        words.update(re.findall(r"[A-Za-z]{5,}", t))
-    bad = [w for w in sorted(words) if w.lower() not in allow]
-    allow_list = list(allow)
-    for w in bad:
-        cand = process.extractOne(w, allow_list, scorer=fuzz.WRatio)
-        sug = cand[0] if cand and cand[1] >= 90 else None
-        msg = f"Possible misspelling: '{w}'" + (f" → did you mean '{sug}'?" if sug else "")
-        findings.append({"page": 1, "message": msg, "severity": "minor", "anchor": w})
+    maps = rules.get("mappings", {})
+    if not maps:
+        return findings
+    for wrong, right in maps.items():
+        if not wrong:
+            continue
+        for m in re.finditer(re.escape(wrong), text, flags=re.IGNORECASE):
+            findings.append({
+                "page": 1,  # refined later if per-page search is needed; kept simple
+                "bbox": None,
+                "rule_id": "MAP:" + wrong,
+                "message": f"Use '{right}' instead of '{wrong}'.",
+                "severity": "Minor",
+                "category": "Mappings",
+            })
     return findings
 
-def address_vs_title_check(pages_text: list[str], meta: dict) -> list[dict]:
-    addr = (meta.get("Site Address","") or "").strip()
-    if not addr:
-        return []
-    if ", 0 ," in addr:
-        return []
-    first = pages_text[0] if pages_text else ""
-    if addr.upper() not in first.upper():
-        return [{"page": 1, "message": "Site Address in metadata doesn’t match the title block.", "severity": "major", "anchor": "TITLE"}]
-    return []
+def find_phrase_rules(pages_text: List[str], rules: dict, meta: dict) -> List[dict]:
+    """Evaluate phrase_rules with optional metadata filters."""
+    out = []
+    phrase_rules = rules.get("phrase_rules", [])
+    for pr in phrase_rules:
+        when = pr.get("when", {})
+        # check metadata gating
+        ok = True
+        for k, v in when.items():
+            if not str(meta.get(k,"")).strip():
+                ok = False
+                break
+            if str(meta.get(k,"")).strip() != str(v).strip():
+                ok = False
+                break
+        if not ok:
+            continue
 
-# ------------------------------ REPORT GENERATION -----------------------------------
+        message = pr.get("message", "Rule triggered")
+        severity = pr.get("severity","Minor")
+        scope = pr.get("scope","text")  # "text" or "title"
+        pats: List[dict] = pr.get("patterns", [])
 
-def make_excel(findings: list[dict], meta: dict, src_name: str, status: str) -> bytes:
-    rows = []
+        # Build search source
+        source_pages = pages_text
+        if scope == "title":
+            # Use first page text as title area
+            source_pages = [pages_text[0] if pages_text else ""]
+
+        for pidx, page_text in enumerate(source_pages, start=1):
+            page_ok = True
+            for pat in pats:
+                must_any = pat.get("any_of", [])
+                all_of = pat.get("all_of", [])
+                not_any = pat.get("not_any", [])
+
+                if must_any:
+                    if not any(re.search(x, page_text, re.IGNORECASE) for x in must_any):
+                        page_ok = False
+                        break
+                if all_of:
+                    if not all(re.search(x, page_text, re.IGNORECASE) for x in all_of):
+                        page_ok = False
+                        break
+                if not_any:
+                    if any(re.search(x, page_text, re.IGNORECASE) for x in not_any):
+                        page_ok = False
+                        break
+            if page_ok:
+                out.append({
+                    "page": pidx,
+                    "bbox": None,
+                    "rule_id": pr.get("id","PHRASE_RULE"),
+                    "message": message,
+                    "severity": severity,
+                    "category": "Phrase",
+                })
+    return out
+
+def site_address_vs_title(pages_text: List[str], site_address: str, enabled: bool) -> List[dict]:
+    if not enabled or not pages_text:
+        return []
+    title_text = pages_text[0]
+    # The user asked: if address contains ", 0 ," ignore the zero
+    addr_norm = re.sub(r",\s*0\s*,", ",", site_address, flags=re.IGNORECASE).strip()
+    # Check phrase-by-phrase presence (loose contains)
+    ok = addr_norm and (addr_norm.lower() in title_text.lower())
+    if ok:
+        return []
+    return [{
+        "page": 1,
+        "bbox": None,
+        "rule_id": "ADDRESS_TITLE_MISMATCH",
+        "message": f"Site Address not found in title: '{addr_norm}'.",
+        "severity": "Major",
+        "category": "Metadata",
+    }]
+
+# --------------------------------------------------------------------------------------
+# AUDIT PIPELINE
+# --------------------------------------------------------------------------------------
+def run_audit(pdf_bytes: bytes, meta: dict, rules: dict) -> List[dict]:
+    pages_text, pages_words = extract_text_and_words(pdf_bytes)
+
+    findings: List[dict] = []
+    # 1) basic mappings (like AHEGC -> AHEGG)
+    for pidx, t in enumerate(pages_text, start=1):
+        for f in apply_mappings(t, rules):
+            f["page"] = pidx
+            findings.append(f)
+
+    # 2) spelling checks (lightweight)
+    findings += spelling_checks(pages_text, rules)
+
+    # 3) phrase rules
+    findings += find_phrase_rules(pages_text, rules, meta)
+
+    # 4) address in title check
+    findings += site_address_vs_title(pages_text, meta.get("site_address",""), rules.get("address_match_title", True))
+
+    # You can append more domain rules here (mimo consistency across sectors, vendor combos, etc.)
+
+    # Attach rough bbox if we can match exact words (best-effort)
+    # Map each finding message first found token back to a word bbox on the page
     for f in findings:
-        rows.append({
-            "Page": f.get("page",1), "Severity": f.get("severity","minor"),
-            "Comment": f.get("message",""), "Anchor": f.get("anchor","")
-        })
-    df = pd.DataFrame(rows or [{"Page":"","Severity":"","Comment":"","Anchor":""}])
+        if f.get("bbox"):
+            continue
+        page = f.get("page", 1)
+        msg = f.get("message","")
+        m = re.findall(r"'([^']+)'", msg)
+        if m and 1 <= page <= len(pages_words):
+            target = m[0]
+            for wd in pages_words[page-1]:
+                if wd["text"].lower() == target.lower():
+                    f["bbox"] = wd["bbox"]
+                    break
+    return findings
 
-    # Meta sheet as one row
-    mrow = {k: meta.get(k,"") for k in [
-        "Supplier","Drawing Type","Client","Project","Site Type","Proposed Vendor",
-        "Proposed Cabinet Location","Proposed Radio Location","Quantity of Sectors",
-        "MIMO S1","MIMO S2","MIMO S3","MIMO S4","MIMO S5","MIMO S6","Site Address"
-    ]}
-    meta_df = pd.DataFrame([mrow])
+# --------------------------------------------------------------------------------------
+# REPORTS (Excel + Annotated PDF)
+# --------------------------------------------------------------------------------------
+def make_excel(findings: List[dict], meta: dict, original_pdf_name: str, status: str) -> bytes:
+    df = pd.DataFrame(findings if findings else [])
+    if df.empty:
+        df = pd.DataFrame(columns=["page","rule_id","severity","category","message","x0","y0","x1","y1"])
+    else:
+        # split bbox into columns
+        df["x0"] = df["bbox"].apply(lambda b: b[0] if isinstance(b, (list,tuple)) and len(b)==4 else "")
+        df["y0"] = df["bbox"].apply(lambda b: b[1] if isinstance(b, (list,tuple)) and len(b)==4 else "")
+        df["x1"] = df["bbox"].apply(lambda b: b[2] if isinstance(b, (list,tuple)) and len(b)==4 else "")
+        df["y1"] = df["bbox"].apply(lambda b: b[3] if isinstance(b, (list,tuple)) and len(b)==4 else "")
 
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-        df.to_excel(xw, sheet_name="Findings", index=False)
-        meta_df.to_excel(xw, sheet_name="Metadata", index=False)
-        ws = xw.book.create_sheet("Summary", 0)
-        ws["A1"] = "Source file"; ws["B1"] = src_name
-        ws["A2"] = "Status"; ws["B2"] = status
-        ws["A3"] = "Generated"; ws["B3"] = now_utc_iso()
-    return buf.getvalue()
+    meta_df = pd.DataFrame([meta])
 
-def bundle_zip(excel_bytes: bytes, pdf_bytes: bytes, base_stem: str) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(base_stem + ".xlsx", excel_bytes)
-        z.writestr(base_stem + ".pdf", pdf_bytes)
-    return buf.getvalue()
-
-# ------------------------------------ UI GATES --------------------------------------
-
-def gate_with_password():
-    if "entry_ok" not in st.session_state:
-        st.session_state.entry_ok = False
-    if st.session_state.entry_ok:
-        return True
-    pw = st.text_input("Enter access password", type="password")
-    if st.button("Unlock"):
-        st.session_state.entry_ok = (pw == ENTRY_PASSWORD)
-        if not st.session_state.entry_ok:
-            st.error("Wrong password.")
-    return st.session_state.entry_ok
-
-# =============================== MAIN APP ============================================
-
-def audit_tab():
-    st.markdown("### Audit Metadata (all required)")
-    col1,col2,col3,col4 = st.columns(4)
-    supplier = col1.selectbox("Supplier", SUPPLIERS, index=0)
-    drawing_type = col2.selectbox("Drawing Type", DRAWING_TYPES)
-    client = col3.selectbox("Client", CLIENTS)
-    project = col4.selectbox("Project", PROJECTS)
-
-    col1,col2,col3,col4 = st.columns(4)
-    site_type = col1.selectbox("Site Type", SITE_TYPES)
-    vendor = col2.selectbox("Proposed Vendor", VENDORS)
-    cab_loc = col3.selectbox("Proposed Cabinet Location", CAB_LOCS)
-    radio_loc = col4.selectbox("Proposed Radio Location", RADIO_LOCS)
-
-    col1,col2 = st.columns([1,3])
-    qty = col1.selectbox("Quantity of Sectors", [1,2,3,4,5,6], index=0)
-    site_addr = col2.text_input("Site Address")
-
-    st.markdown("### Proposed MIMO Config")
-    use_all = st.checkbox("Use S1 for all sectors", value=True)
-    sector_mimos = {}
-    for s in range(1, qty+1):
-        if s == 1:
-            sector_mimos[f"MIMO S{s}"] = st.selectbox("MIMO S1", MIMO_OPTIONS, index=0, key=f"mimo_{s}")
-        else:
-            label = f"MIMO S{s}"
-            if use_all:
-                sector_mimos[label] = sector_mimos["MIMO S1"]
-                st.selectbox(label, MIMO_OPTIONS, index=MIMO_OPTIONS.index(sector_mimos["MIMO S1"]), key=f"mimo_{s}", disabled=True)
-            else:
-                sector_mimos[label] = st.selectbox(label, MIMO_OPTIONS, index=0, key=f"mimo_{s}")
-
-    up = st.file_uploader("Upload PDF Design", type=["pdf"])
-    exclude = st.checkbox("Exclude this review from analytics", value=False)
-    do_spell = st.checkbox("Run spelling pass", value=True)
-
-    if st.button("Run Audit", type="primary", disabled=(up is None)):
-        if up is None:
-            st.warning("Please upload a PDF design.")
-            return
-
-        original_bytes = up.read()
-        pages = extract_pages_text(original_bytes)
-
-        meta = {
-            "Supplier": supplier,
-            "Drawing Type": drawing_type,
-            "Client": client,
-            "Project": project,
-            "Site Type": site_type,
-            "Proposed Vendor": vendor,
-            "Proposed Cabinet Location": cab_loc,
-            "Proposed Radio Location": radio_loc,
-            "Quantity of Sectors": qty,
-            "Site Address": site_addr,
-        }
-        for k,v in sector_mimos.items():
-            meta[k] = v
-
-        # Load rules
-        rules_file = REPO_ROOT / st.session_state.get("rules_file_name", RULES_FILE_DEFAULT)
-        rules = load_rules(rules_file)
-
-        findings = []
-        findings += apply_rules(pages, meta, rules)
-        findings += address_vs_title_check(pages, meta)
-
-        if do_spell:
-            # allow-list seeds from rules
-            allow = set(w.lower() for w in rules.get("dictionary", []))
-            findings += spelling_checks(pages, allow)
-
-        # Decide PASS/REJECT
-        status = "REJECTED" if any(f.get("severity","minor") == "major" for f in findings) else "PASS"
-
-        # Outputs
-        stem = Path(up.name).stem + f" - {status} - {dt.datetime.utcnow().strftime('%Y%m%d')}"
-        excel_bytes = make_excel(findings, meta, up.name, status)
-        pdf_bytes = annotate_pdf(original_bytes, findings, meta, status)
-        zip_bytes = bundle_zip(excel_bytes, pdf_bytes, stem)
-
-        # Persist files
-        excel_name = safe_file_name(stem, ".xlsx")
-        pdf_name = safe_file_name(stem, ".pdf")
-        zip_name = safe_file_name(stem, ".zip")
-        (HISTORY_DIR / excel_name).write_bytes(excel_bytes)
-        (HISTORY_DIR / pdf_name).write_bytes(pdf_bytes)
-        (HISTORY_DIR / zip_name).write_bytes(zip_bytes)
-
-        # History row
-        row = {
-            "timestamp_utc": now_utc_iso(),
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as xw:
+        meta_df.to_excel(xw, index=False, sheet_name="Audit_Metadata")
+        df.to_excel(xw, index=False, sheet_name="Findings")
+        summary = pd.DataFrame([{
             "status": status,
-            "client": client,
-            "project": project,
-            "site_type": site_type,
-            "vendor": vendor,
-            "cabinet_location": cab_loc,
-            "radio_location": radio_loc,
-            "drawing_type": drawing_type,
-            "supplier": supplier,
-            "qty_sectors": qty,
-            "mimo_s1": meta.get("MIMO S1",""),
-            "mimo_s2": meta.get("MIMO S2",""),
-            "mimo_s3": meta.get("MIMO S3",""),
-            "mimo_s4": meta.get("MIMO S4",""),
-            "mimo_s5": meta.get("MIMO S5",""),
-            "mimo_s6": meta.get("MIMO S6",""),
-            "site_address": site_addr,
-            "file_name": up.name,
-            "excel_name": excel_name,
-            "pdf_name": pdf_name,
-            "zip_name": zip_name,
-            "exclude": bool(exclude),
-        }
-        append_history(row)
+            "findings_count": len(findings),
+            "timestamp_utc": datetime.utcnow().isoformat()
+        }])
+        summary.to_excel(xw, index=False, sheet_name="Summary")
+    return out.getvalue()
 
-        st.success(f"Audit complete → {status}")
-        c1,c2,c3 = st.columns(3)
-        c1.download_button("⬇️ Excel report", excel_bytes, file_name=excel_name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        c2.download_button("⬇️ Annotated PDF", pdf_bytes, file_name=pdf_name, mime="application/pdf")
-        c3.download_button("⬇️ Both (ZIP)", zip_bytes, file_name=zip_name, mime="application/zip")
+def persist_export_files(base_name_no_ext: str, excel_bytes: bytes, annot_pdf_bytes: bytes) -> Tuple[str,str]:
+    ensure_dirs()
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    excel_name = f"{base_name_no_ext}__{ts}.xlsx"
+    pdf_name   = f"{base_name_no_ext}__{ts}.pdf"
+    excel_path = os.path.join(EXPORT_DIR, excel_name)
+    pdf_path   = os.path.join(EXPORT_DIR, pdf_name)
+    with open(excel_path, "wb") as f:
+        f.write(excel_bytes)
+    with open(pdf_path, "wb") as f:
+        f.write(annot_pdf_bytes)
+    return excel_name, pdf_name
+
+# --------------------------------------------------------------------------------------
+# UI HELPERS
+# --------------------------------------------------------------------------------------
+def gate_with_password() -> bool:
+    c1, c2 = st.columns([1,3])
+    with c1:
+        show_logo()
+    with c2:
+        st.title(APP_TITLE)
+        st.caption("Secure Access")
+        pwd = st.text_input("Enter access password", type="password", key="entry_pw")
+        ok = st.button("Enter", use_container_width=True)
+        if ok:
+            if pwd.strip() == ENTRY_PASSWORD:
+                st.session_state["authed"] = True
+                return True
+            else:
+                st.error("Incorrect password.")
+    return st.session_state.get("authed", False)
+
+def show_logo():
+    logo_path = st.session_state.get("logo_path", "")
+    b64 = b64_of_file(logo_path)
+    if b64:
+        st.markdown(
+            f"""
+            <div style="display:flex;align-items:center;gap:8px;">
+                <img src="data:image/png;base64,{b64}" style="height:50px;object-fit:contain;border-radius:6px;" />
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.caption("🔖 Add logo in Settings → Branding")
+
+def meta_form() -> dict:
+    st.subheader("Audit Metadata")
+    c0, c1, c2, c3 = st.columns(4)
+    with c0:
+        reviewer = st.text_input("Reviewer", value=st.session_state.get("reviewer",""))
+    with c1:
+        supplier = st.selectbox("Supplier", options=sorted(set(DEFAULT_SUPPLIERS + list(load_history()["supplier"].dropna()))), index=0 if DEFAULT_SUPPLIERS else None)
+    with c2:
+        client = st.selectbox("Client", options=DEFAULT_CLIENTS)
+    with c3:
+        project = st.selectbox("Project", options=DEFAULT_PROJECTS)
+
+    c4, c5, c6, c7 = st.columns(4)
+    with c4:
+        site_type = st.selectbox("Site Type", options=DEFAULT_SITE_TYPES)
+    with c5:
+        vendor = st.selectbox("Vendor", options=DEFAULT_VENDORS)
+    with c6:
+        radio_location = st.selectbox("Radio Location", options=DEFAULT_RADIO_LOCATIONS)
+    with c7:
+        cabinet_location = st.selectbox("Cabinet Location", options=DEFAULT_CABINET_LOCATIONS)
+
+    c8, c9 = st.columns([1,3])
+    with c8:
+        sectors_qty = st.selectbox("Quantity of Sectors", options=DEFAULT_SECTOR_QTY, index=2)  # default 3
+    with c9:
+        site_address = st.text_input("Site Address (must match title unless '0' placeholder present)")
+
+    # Drawings
+    drawing_type = st.selectbox("Drawing Type", options=DEFAULT_DRAWING_TYPES)
+
+    st.markdown("---")
+    st.markdown("#### Proposed MIMO Config (per sector)")
+    hide_mimo = (project.strip().lower() == "power resilience")
+    if hide_mimo:
+        st.info("Proposed MIMO Config is optional for Power Resilience.", icon="ℹ️")
+
+    use_s1_for_all = st.checkbox("Use S1 for all sectors", value=True)
+
+    mimo_s1 = st.selectbox("MIMO S1", options=DEFAULT_MIMO_OPTIONS)
+    def mimo_sel(label, default):
+        return st.selectbox(label, options=DEFAULT_MIMO_OPTIONS, index=DEFAULT_MIMO_OPTIONS.index(default) if default in DEFAULT_MIMO_OPTIONS else 0, disabled=use_s1_for_all)
+
+    mimo_values = {"mimo_s1": mimo_s1}
+    for i in range(2, sectors_qty+1):
+        default = mimo_s1 if use_s1_for_all else DEFAULT_MIMO_OPTIONS[0]
+        mimo_values[f"mimo_s{i}"] = mimo_sel(f"MIMO S{i}", default)
+
+    exclude_from_analytics = st.checkbox("Exclude this run from analytics", value=False)
+
+    meta = {
+        "reviewer": reviewer,
+        "supplier": supplier,
+        "client": client,
+        "project": project,
+        "site_type": site_type,
+        "vendor": vendor,
+        "radio_location": radio_location,
+        "cabinet_location": cabinet_location,
+        "sectors_qty": sectors_qty,
+        "site_address": site_address,
+        "drawing_type": drawing_type,
+        "exclude_from_analytics": exclude_from_analytics,
+    }
+    meta.update(mimo_values)
+    return meta
+
+def training_panel(rules_path: str, rules: dict, findings: List[dict]):
+    st.subheader("Training / Rapid Learning")
+    st.caption("Mark false positives as **Not Valid** (will append to allowlist / phrase exceptions), add quick mappings, or bulk-apply via uploaded review CSV.")
+
+    if findings:
+        df = pd.DataFrame(findings)
+        edit_df = st.data_editor(
+            df[["page","rule_id","severity","category","message"]],
+            hide_index=True,
+            use_container_width=True,
+            key="training_editor"
+        )
+        col_a, col_b, col_c = st.columns([1,1,2])
+        with col_a:
+            add_to_allow = st.text_input("Add word to allowlist (never flag)", placeholder="e.g., AHEGG")
+            if st.button("➕ Add to Allowlist"):
+                if add_to_allow:
+                    rules.setdefault("allowlist", [])
+                    if add_to_allow not in rules["allowlist"]:
+                        rules["allowlist"].append(add_to_allow)
+                        save_rules(rules_path, rules)
+                        st.success(f"Added '{add_to_allow}' to allowlist.")
+        with col_b:
+            wrong = st.text_input("Mapping: wrong", placeholder="AHEGC")
+            right = st.text_input("Mapping: correct", placeholder="AHEGG")
+            if st.button("➕ Add Mapping"):
+                if wrong and right:
+                    rules.setdefault("mappings", {})
+                    rules["mappings"][wrong] = right
+                    save_rules(rules_path, rules)
+                    st.success(f"Mapping added: {wrong} → {right}")
+        with col_c:
+            st.caption("Bulk: Upload review CSV with columns like rule_id, decision(Valid/Not Valid), note")
+            up = st.file_uploader("Upload Review CSV", type=["csv"], key="train_csv")
+            if up is not None:
+                try:
+                    tdf = pd.read_csv(up)
+                    # For any Not Valid - try to pull quoted tokens and add to allowlist
+                    rules.setdefault("allowlist", [])
+                    for _, r in tdf.iterrows():
+                        dec = str(r.get("decision","")).strip().lower()
+                        if dec == "not valid":
+                            msg = str(r.get("message",""))
+                            quoted = re.findall(r"'([^']+)'", msg)
+                            for q in quoted:
+                                if q and q not in rules["allowlist"]:
+                                    rules["allowlist"].append(q)
+                    save_rules(rules_path, rules)
+                    st.success("Bulk review ingested and allowlist updated.")
+                except Exception as e:
+                    st.error(f"Could not parse CSV: {e}")
+    else:
+        st.info("Run an audit to enable training on its findings.")
 
 def analytics_tab():
-    st.markdown("### Analytics")
-    df = load_history()
-    if df.empty:
-        st.info("No history yet.")
-        return
+    st.subheader("📊 Analytics")
+    dfh = load_history()
 
-    # Filter UI
-    c1, c2, c3 = st.columns(3)
-    supplier_f = c1.selectbox("Supplier filter", ["(All)"] + SUPPLIERS, index=0)
-    project_f = c2.selectbox("Project filter", ["(All)"] + PROJECTS, index=0)
-    client_f  = c3.selectbox("Client filter", ["(All)"] + CLIENTS, index=0)
-    dfv = df[df["exclude"] != True].copy()
-    if supplier_f != "(All)":
-        dfv = dfv[dfv["supplier"] == supplier_f]
-    if project_f != "(All)":
-        dfv = dfv[dfv["project"] == project_f]
-    if client_f != "(All)":
-        dfv = dfv[dfv["client"] == client_f]
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        supplier_filter = st.selectbox("Supplier (filter)", ["All"] + sorted([s for s in dfh["supplier"].dropna().unique() if s!=""]))
+    with c2:
+        client_filter = st.selectbox("Client (filter)", ["All"] + sorted([s for s in dfh["client"].dropna().unique() if s!=""]))
+    with c3:
+        project_filter = st.selectbox("Project (filter)", ["All"] + sorted([s for s in dfh["project"].dropna().unique() if s!=""]))
+    with c4:
+        include_excluded = st.toggle("Include excluded from analytics", value=False)
 
-    total = len(dfv)
-    rft = int((dfv["status"] == "PASS").sum())
-    rft_pct = (rft/total*100) if total else 0
-    rej = (dfv["status"] == "REJECTED").sum()
+    show = dfh.copy()
+    if not include_excluded:
+        show = show[~show["exclude"].fillna(False)]
 
-    k1,k2,k3 = st.columns(3)
-    k1.metric("Total audits", total)
-    k2.metric("Right First Time", f"{rft_pct:.1f}%")
-    k3.metric("Rejected", rej)
+    if supplier_filter != "All":
+        show = show[show["supplier"] == supplier_filter]
+    if client_filter != "All":
+        show = show[show["client"] == client_filter]
+    if project_filter != "All":
+        show = show[show["project"] == project_filter]
 
-    st.markdown("#### Recent audits")
-    show = dfv.sort_values("timestamp_utc", ascending=False).head(50)
-    st.dataframe(show[[
-        "timestamp_utc","supplier","client","project","status","pdf_name","excel_name"
-    ]], use_container_width=True)
+    show = show.sort_values("timestamp_utc", ascending=False)
 
-def training_tab():
-    st.markdown("### Training / Feedback")
-    st.write("Upload a previous result to **teach** the tool. Mark as **Valid** if the tool was right, or **Not Valid** if it was wrong and enter the correction (which can become a rule).")
+    total = len(show)
+    rejected = int((show["status"].str.upper() == "REJECTED").sum())
+    passed = int((show["status"].str.upper() == "PASS").sum())
+    rft = show["right_first_time"].dropna()
+    rft_avg = float(rft.mean()) if not rft.empty else None
 
-    uploaded = st.file_uploader("Upload Excel report (Findings) or JSON export", type=["xlsx","json"], key="train_upl")
-    valid = st.radio("Verdict", ["Valid","Not Valid"], horizontal=True)
-    corr_text = st.text_area("Correction (new rule idea or mapping)", placeholder="e.g., AHEGC should be AHEGG; or 'Title block must include Drawing Number'")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total Audits", total)
+    k2.metric("Pass / Rejected", f"{passed} / {rejected}")
+    k3.metric("Avg Right-First-Time %", f"{rft_avg:.1f}%" if rft_avg is not None else "—")
 
-    if st.button("Record feedback"):
-        rec = {
-            "timestamp_utc": now_utc_iso(),
-            "type": "feedback",
-            "verdict": valid,
-            "note": corr_text.strip(),
-            "attachment_name": uploaded.name if uploaded else "",
-        }
-        # Store quick feedback as JSON alongside history for ops review
-        fb_name = safe_file_name(f"feedback_{dt.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}", ".json")
-        (HISTORY_DIR / fb_name).write_text(json.dumps(rec, indent=2))
-        st.success("Feedback captured. You can later convert Not Valid items into new rules from Settings.")
+    st.dataframe(
+        safe_select(show, ["timestamp_utc","supplier","client","project","status","pdf_name","excel_name","annot_pdf_name"]),
+        use_container_width=True,
+        hide_index=True
+    )
 
-def settings_tab():
-    st.markdown("### Settings")
-    # Logo file name override
-    st.text_input("Logo file in repo root (optional, e.g., `88F3...png`)", key="logo_file", help="Just the file name, placed in the repository root.")
+def settings_tab(rules_path: str, rules: dict):
+    st.subheader("Settings")
+    st.caption("Admin password required to edit rules or branding.")
+    apw = st.text_input("Admin password", type="password", key="admin_pw")
+    locked = apw.strip() != ADMIN_PASSWORD
 
-    # Choose rules file
-    st.text_input("Rules file name", key="rules_file_name", value=st.session_state.get("rules_file_name", RULES_FILE_DEFAULT))
+    with st.expander("Branding & UI", expanded=True):
+        if locked:
+            st.info("Enter admin password to modify.", icon="🔒")
+        logo_path = st.text_input("Logo file path (repo root)", value=st.session_state.get("logo_path",""), disabled=locked)
+        if not locked and st.button("Save Branding"):
+            st.session_state["logo_path"] = logo_path
+            st.success("Branding updated.")
 
-    # Rules editor gate
-    pw = st.text_input("Rules password", type="password")
-    rules_file = REPO_ROOT / (st.session_state.get("rules_file_name") or RULES_FILE_DEFAULT)
-    curr = load_rules(rules_file)
+        st.number_input("Keep results visible in UI (hours)", min_value=1, max_value=336,
+                        value=st.session_state.get("ui_visibility_hours", DEFAULT_UI_VISIBILITY_HOURS),
+                        key="ui_visibility_hours", disabled=locked)
 
-    txt = st.text_area(rules_file.name, value=yaml.safe_dump(curr, sort_keys=False, allow_unicode=True), height=380)
-    c1,c2 = st.columns([1,1])
-    if c1.button("Save rules"):
-        if pw != RULES_EDIT_PASSWORD:
-            st.error("Wrong rules password.")
-        else:
+    with st.expander("Rules: Global Flags", expanded=True):
+        address_match = st.checkbox("Require Site Address to appear in title", value=rules.get("address_match_title", True), disabled=locked)
+        spelling_en = st.checkbox("Enable Spelling Check", value=rules.get("spelling",{}).get("enabled", True), disabled=locked)
+        if not locked and st.button("Save Global Flags"):
+            rules["address_match_title"] = bool(address_match)
+            rules.setdefault("spelling", {})["enabled"] = bool(spelling_en)
+            save_rules(rules_path, rules)
+            st.success("Global flags saved.")
+
+    with st.expander("Rules: Allowlist & Mappings", expanded=False):
+        if locked:
+            st.info("Enter admin password to modify.", icon="🔒")
+        allowlist_txt = "\n".join(rules.get("allowlist", []))
+        mappings_txt = "\n".join([f"{k}=>{v}" for k,v in rules.get("mappings", {}).items()])
+        new_allow = st.text_area("Allowlist (one per line)", value=allowlist_txt, height=160, disabled=locked)
+        new_maps = st.text_area("Mappings (wrong=>right, one per line)", value=mappings_txt, height=160, disabled=locked)
+        if not locked and st.button("Save Allowlist & Mappings"):
+            rules["allowlist"] = [x.strip() for x in new_allow.splitlines() if x.strip()]
+            maps = {}
+            for line in new_maps.splitlines():
+                if "=>" in line:
+                    a,b = line.split("=>",1)
+                    maps[a.strip()] = b.strip()
+            rules["mappings"] = maps
+            save_rules(rules_path, rules)
+            st.success("Allowlist & Mappings saved.")
+
+    with st.expander("Rules: Phrase Rules (YAML raw)", expanded=False):
+        st.caption("Advanced users can edit the raw YAML rules.")
+        raw = yaml.safe_dump(rules, sort_keys=False, allow_unicode=True)
+        new_raw = st.text_area("rules_example.yaml (full)", value=raw, height=400, disabled=locked, help="Be careful with YAML syntax.")
+        if not locked and st.button("Save YAML"):
             try:
-                new_data = yaml.safe_load(txt) or {}
-                if not isinstance(new_data, dict):
-                    raise ValueError("Rules must be a mapping at top level.")
-                save_yaml_safe(rules_file, new_data)
-                st.success("Rules saved.")
+                parsed = yaml.safe_load(new_raw) or {}
+                save_rules(rules_path, parsed)
+                st.success("Rules YAML saved.")
             except Exception as e:
                 st.error(f"YAML error: {e}")
 
-    if c2.button("Reload from disk"):
-        st.experimental_rerun()
-
-    st.markdown("---")
-    if st.button("Clear all history (keeps files)"):
-        ensure_history_headers()
-        pd.DataFrame(columns=pd.read_csv(HISTORY_CSV).columns).to_csv(HISTORY_CSV, index=False)
-        st.success("History cleared (files remain in /history).")
-
-# -------------------------------------------------------------------------------------
-
+# --------------------------------------------------------------------------------------
+# MAIN APP
+# --------------------------------------------------------------------------------------
 def main():
+    st.set_page_config(page_title=APP_TITLE, page_icon="🔎", layout="wide")
+    ensure_dirs()
+
+    # Gate
     if not gate_with_password():
         st.stop()
 
-    logo_header()
-    st.write("Professional, consistent design QA with audit trail, annotations, analytics, and easy rule updates.")
+    # Header row with logo
+    h1, h2 = st.columns([1,6], vertical_alignment="center")
+    with h1:
+        show_logo()
+    with h2:
+        st.title(APP_TITLE)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Audit", "Analytics", "Training", "Settings"])
+    # Sidebar: audit controls
+    with st.sidebar:
+        st.header("Controls")
+        clear_meta = st.button("Clear Metadata", use_container_width=True)
+        st.session_state.setdefault("reviewer","")
+        if clear_meta:
+            # reset only metadata keys
+            for k in list(st.session_state.keys()):
+                if k.startswith("mimo_") or k in ("reviewer","entry_pw"):
+                    st.session_state[k] = ""
 
-    with tab1:
-        audit_tab()
-    with tab2:
+    rules_path = DEFAULT_RULES_FILE
+    if not os.path.exists(rules_path):
+        # seed a minimal file
+        seed = {
+            "allowlist": [],
+            "mappings": {},
+            "phrase_rules": [],
+            "metadata_rules": {},
+            "address_match_title": True,
+            "spelling": {"enabled": True}
+        }
+        save_rules(rules_path, seed)
+
+    rules = load_rules(rules_path)
+
+    # Tabs
+    tab_audit, tab_training, tab_analytics, tab_settings = st.tabs(["🔍 Audit", "🧠 Training", "📊 Analytics", "⚙️ Settings"])
+
+    with tab_audit:
+        meta = meta_form()
+        st.markdown("---")
+        up = st.file_uploader("Upload PDF (unlimited size; DWG optional later)", type=["pdf"], accept_multiple_files=False)
+        c1, c2, c3 = st.columns([1,1,2])
+        with c1:
+            audit_clicked = st.button("▶️ Run Audit", type="primary", use_container_width=True, disabled=(up is None))
+        with c2:
+            pass
+
+        if up and audit_clicked:
+            pdf_bytes = up.read()
+            # Guard: require all metadata filled
+            missing = [k for k,v in meta.items() if v in ("", None) and k not in ("mimo_s2","mimo_s3","mimo_s4","mimo_s5","mimo_s6")]
+            if missing:
+                st.error(f"Please complete all metadata fields before auditing. Missing: {', '.join(missing)}")
+                st.stop()
+
+            findings = run_audit(pdf_bytes, meta, rules)
+            status = "PASS" if len(findings) == 0 else "REJECTED"
+
+            # Build outputs
+            base_no_ext = os.path.splitext(up.name)[0] + f"__{status}"
+            excel_bytes = make_excel(findings, meta, up.name, status)
+            annot_pdf_bytes = annotate_pdf(pdf_bytes, findings)
+
+            # Persist (these remain on disk; UI shows last 24h by default)
+            excel_name, pdf_name = persist_export_files(base_no_ext, excel_bytes, annot_pdf_bytes)
+
+            # History
+            append_history_row(meta, status, pdf_name=pdf_name, excel_name=excel_name, annot_pdf_name=pdf_name, run_id=uuid_str())
+
+            st.success(f"Audit complete: **{status}**")
+            dl1, dl2 = st.columns(2)
+            with dl1:
+                st.download_button("⬇️ Download Excel Report", data=excel_bytes, file_name=f"{base_no_ext}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+            with dl2:
+                st.download_button("⬇️ Download Annotated PDF", data=annot_pdf_bytes, file_name=f"{base_no_ext}.pdf", mime="application/pdf", use_container_width=True)
+
+            st.markdown("#### Findings")
+            if findings:
+                st.dataframe(pd.DataFrame(findings)[["page","rule_id","severity","category","message"]], use_container_width=True, hide_index=True)
+            else:
+                st.info("No issues found. ✅")
+
+    with tab_training:
+        # Allow training from the last run in session? Instead, let user upload last report's Excel to ingest decisions
+        st.info("Tip: **Run an audit**, then use this panel to add allowlist items, mappings or bulk-apply decisions. You can also ingest a previously downloaded Excel report.")
+        # If they just ran an audit, we can reuse (not persisted in session here), so ask to upload
+        xup = st.file_uploader("Upload a prior Excel Report (Findings sheet) to train from", type=["xlsx"])
+        findings_for_training: List[dict] = []
+        if xup is not None:
+            try:
+                xls = pd.ExcelFile(xup)
+                fd = pd.read_excel(xls, "Findings")
+                # Convert to findings-like dicts
+                for _, r in fd.iterrows():
+                    findings_for_training.append({
+                        "page": int(r.get("page", 1)) if pd.notna(r.get("page")) else 1,
+                        "rule_id": str(r.get("rule_id","")),
+                        "severity": str(r.get("severity","")),
+                        "category": str(r.get("category","")),
+                        "message": str(r.get("message","")),
+                        "bbox": None
+                    })
+                st.success(f"Loaded {len(findings_for_training)} findings from report.")
+            except Exception as e:
+                st.error(f"Could not read report: {e}")
+        training_panel(rules_path, rules, findings_for_training)
+
+    with tab_analytics:
         analytics_tab()
-    with tab3:
-        training_tab()
-    with tab4:
-        settings_tab()
+
+    with tab_settings:
+        settings_tab(rules_path, rules)
 
 if __name__ == "__main__":
     main()
