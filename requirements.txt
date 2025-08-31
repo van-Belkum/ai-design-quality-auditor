@@ -1,9 +1,10 @@
 streamlit
 pandas
 numpy
+rapidfuzz
 pyyaml
-PyMuPDF
 openpyxl
-xlsxwriter
+PyMuPDF
+pdf2image
+pytesseract
 pyspellchecker
-xlrd
